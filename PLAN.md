@@ -51,8 +51,9 @@ Without it, every HTMX poll from every browser hits the K8s API directly — N u
 
 ## Authentication
 
-- **Basic Auth (MVP):** `AUTH_USERNAME` and `AUTH_PASSWORD` env vars required. Fiber middleware validates credentials on every request except `/healthz` and `/readyz` (probe endpoints must be unauthenticated for kubelet).
-- **Startup validation:** app refuses to start if `AUTH_USERNAME` or `AUTH_PASSWORD` is empty or not set.
+- **Basic Auth (MVP):** `AUTH_USERNAME` and `AUTH_PASSWORD` (env vars or CLI flags) required. Fiber's `basicauth` middleware validates credentials using SHA-256 hashed passwords (`Users` map with `{SHA256}<base64>` format). The middleware handles comparison internally, so plaintext passwords are never stored on the `Config` struct.
+- **Startup validation:** kong enforces required fields at parse time — app exits with a clear error if `AUTH_USERNAME` or `AUTH_PASSWORD` is missing.
+- **Request logging:** Fiber's `logger` middleware (registered before `basicauth`) logs every request with status code, method, path, and IP — failed auth attempts appear as `401` entries.
 - **K8s auth** (separate concern):
   - **Primary:** In-cluster (service account) — for production deployment
   - **Fallback:** Kubeconfig file (`~/.kube/config` or `KUBECONFIG` env var) — for local dev
@@ -79,7 +80,7 @@ k8s-crondash/
   main.go              → wire everything, load config, start server
   internal/
     config/
-      config.go        → Config struct, Load(), Validate() from env vars
+      config.go        → Config struct (kong tags), Load(), Validate() for semantic checks
     k8s/
       client.go        → k8s client setup (in-cluster + kubeconfig fallback)
       cronjobs.go      → ListCronJobs, GetCronJob, TriggerCronJob
@@ -119,7 +120,8 @@ The `state.Store` implements this interface. Handler tests inject a mock. `k8s/`
 
 Structured logging via `log/slog` (stdlib since Go 1.21). All handler and K8s operations log with request-scoped fields:
 
-- Handler middleware injects `namespace`, `cronjob_name`, `method`, `path` into the slog context
+- Fiber `logger` middleware logs every request with `time`, `ip`, `status`, `latency`, `method`, `path`, `error` — covers failed auth (401s)
+- Handler middleware injects `namespace`, `cronjob_name`, `method`, `path` into the slog context (Phase 3+)
 - K8s operations log with `component=k8s`, `operation`, duration
 - Trigger operations log with `component=trigger`, `namespace`, `name`, `success`
 
@@ -129,10 +131,11 @@ No external logging library — `slog` is sufficient for this scope.
 
 - `github.com/gofiber/fiber/v3` — HTTP server
 - `github.com/a-h/templ` — typed HTML templates
+- `github.com/alecthomas/kong` — CLI flag and env var config parsing
 - `k8s.io/client-go` — Kubernetes API client
 - missing.css loaded via CDN (`https://unpkg.com/missing.css@1.2.0/dist/missing.min.css`, integrity `sha256-+bBeBYUh9+UNWDnPnXnxnT56osQnODQd6JzO8wZ9ZBo=`)
 - HTMX loaded via CDN (no build step)
-- Stdlib only for config (`os.Getenv`, `strconv`), logging (`log/slog`)
+- Stdlib for logging (`log/slog`), password hashing (`crypto/sha256`, `encoding/base64`)
 
 ## Testing Strategy
 
@@ -153,16 +156,16 @@ The dashboard must signal when a job is already running for a CronJob:
 
 ## MVP Scope
 
-1. **Config** — env var loading with `Config` struct, `Load()`, `Validate()`
+1. **Config** — kong-based config from env vars + CLI flags with `Config` struct, `Load()`, `Validate()` for semantic checks
 2. **K8s client** — connect to cluster (in-cluster + kubeconfig fallback), list cronjobs
 3. **Cached state** — background informer-backed store, serves all reads
-4. **Basic auth** — fiber middleware, probe endpoints excluded
+4. **Basic auth** — fiber `basicauth` middleware with SHA-256 hashed passwords (`Users` map), probe endpoints excluded, request logging via `logger` middleware
 5. **Dashboard view** — table: name, namespace, schedule, suspend status, running status, last successful run, last failure
 6. **Manual trigger** — confirmation modal (HTMX swap) → creates a one-off Job from the CronJob spec, with explicit concurrency check
 7. **Auto-refresh** — HTMX polling (configurable interval) reads from cache
 8. **Health probes** — `/healthz` (liveness, simple 200) and `/readyz` (readiness, checks cache freshness)
 9. **Graceful shutdown** — signal handling (`SIGTERM`/`SIGINT`) via `signal.NotifyContext`, fiber `Shutdown()` with timeout
-10. **Structured logging** — `log/slog` throughout
+10. **Structured logging** — `log/slog` throughout, Fiber `logger` middleware for request logging
 
 ## Trigger Safety
 
@@ -304,10 +307,10 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 ## TODO
 
 ### Phase 1 — Scaffold & Config
-- [x] `internal/config/config.go` — `Config` struct with `Load()` + `Validate()`, fails fast on missing `AUTH_USERNAME`/`AUTH_PASSWORD`
-- [x] `main.go` — fiber server, basic auth middleware (probe endpoints excluded), health endpoints, structured logging (`slog`), graceful shutdown
-- [x] `justfile` — add `generate` recipe
-- [x] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth
+- [x] `internal/config/config.go` — `Config` struct with kong tags, `Load()`, `Validate()` for semantic checks (TCP address, bounds)
+- [x] `main.go` — fiber server, `basicauth` middleware with SHA-256 hashed passwords (`Users` map), `logger` middleware for request logging, probe endpoints excluded, health endpoints, structured logging (`slog`), graceful shutdown
+- [x] `justfile` — `generate` recipe
+- [x] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth, `--help` shows all flags
 
 ### Phase 2 — K8s Client & Cached State
 - [ ] `internal/k8s/client.go` — client setup (in-cluster + kubeconfig fallback)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"github.com/acidghost/k8s-crondash/internal/config"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/basicauth"
+	"github.com/gofiber/fiber/v3/middleware/logger"
 )
 
 var (
@@ -37,6 +40,8 @@ func main() {
 		AppName: "k8s-crondash",
 	})
 
+	app.Use(logger.New())
+
 	app.Get("/healthz", func(c fiber.Ctx) error {
 		return c.SendStatus(http.StatusOK)
 	})
@@ -46,11 +51,12 @@ func main() {
 	})
 
 	app.Use(basicauth.New(basicauth.Config{
-		Authorizer: func(username, password string, _ fiber.Ctx) bool {
-			return username == cfg.AuthUsername && password == cfg.AuthPassword
+		Users: map[string]string{
+			cfg.AuthUsername: sha256PasswordHash(cfg.AuthPassword),
 		},
-		Realm: "Restricted",
 	}))
+
+	cfg.AuthPassword = ""
 
 	app.Get("/", func(c fiber.Ctx) error {
 		return c.SendString("k8s-crondash dashboard")
@@ -69,4 +75,9 @@ func main() {
 	}
 
 	slog.Info("server stopped")
+}
+
+func sha256PasswordHash(password string) string {
+	h := sha256.Sum256([]byte(password))
+	return "{SHA256}" + base64.StdEncoding.EncodeToString(h[:])
 }
