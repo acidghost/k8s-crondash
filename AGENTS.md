@@ -7,6 +7,8 @@
 - after completing a task, run:
   - formatting: `just fmt`
   - linting: `just lint`
+  - testing: `just test`
+  - pro tip: you can run all in one command `just fmt lint test`
 
 ## Planning
 
