@@ -304,10 +304,10 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 ## TODO
 
 ### Phase 1 — Scaffold & Config
-- [ ] `internal/config/config.go` — `Config` struct with `Load()` + `Validate()`, fails fast on missing `AUTH_USERNAME`/`AUTH_PASSWORD`
-- [ ] `main.go` — fiber server, basic auth middleware (probe endpoints excluded), health endpoints, structured logging (`slog`), graceful shutdown
-- [ ] `justfile` — add `generate` recipe
-- [ ] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth
+- [x] `internal/config/config.go` — `Config` struct with `Load()` + `Validate()`, fails fast on missing `AUTH_USERNAME`/`AUTH_PASSWORD`
+- [x] `main.go` — fiber server, basic auth middleware (probe endpoints excluded), health endpoints, structured logging (`slog`), graceful shutdown
+- [x] `justfile` — add `generate` recipe
+- [x] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth
 
 ### Phase 2 — K8s Client & Cached State
 - [ ] `internal/k8s/client.go` — client setup (in-cluster + kubeconfig fallback)
