@@ -14,6 +14,9 @@ goarch := if arch() == 'aarch64' { 'arm64' } else if arch() == 'x86_64' { 'amd64
 alias b := build
 alias r := run
 
+help:
+    @just --list
+
 generate:
     go tool templ generate
 
@@ -41,11 +44,11 @@ fmt:
 lint:
     golangci-lint run
 
+test:
+    go test ./...
+
 install: build
     cp -v './build/{{program}}-{{goos}}-{{goarch}}' "$(go env GOBIN)/{{program}}"
 
 clean:
     rm -rf build
-
-help:
-    @just --list

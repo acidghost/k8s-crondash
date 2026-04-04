@@ -29,8 +29,8 @@ Web dashboard for watching Kubernetes CronJobs, displaying their status, and man
 ┌──────────────▼──────────────────────────────────┐
 │           Internal packages                      │
 │                                                  │
-│  state/    → cached K8s state (informers +       │
-│              background sync, serves all reads)   │
+│  state/    → cached K8s state (polling goroutine  │
+│              + background sync, serves all reads)  │
 │                                                  │
 │  k8s/      → thin wrapper around client-go       │
 │              list cronjobs, create manual jobs    │
@@ -43,11 +43,10 @@ Web dashboard for watching Kubernetes CronJobs, displaying their status, and man
 
 ### Why a Cache/State Layer?
 
-Without it, every HTMX poll from every browser hits the K8s API directly — N users × 1 request per `REFRESH_INTERVAL` seconds. A background goroutine (backed by client-go informers) syncs state once, and all HTTP handlers read from a `sync.RWMutex`-guarded cache. This:
+Without it, every HTMX poll from every browser hits the K8s API directly — N users × 1 request per `REFRESH_INTERVAL` seconds. A background goroutine (polling on a ticker) syncs state at a configurable interval, and all HTTP handlers read from a `sync.RWMutex`-guarded cache. This:
 
 - Eliminates thundering-herd API calls
 - Makes "connection lost" detection trivial (track last successful sync timestamp)
-- Provides near-real-time state via informer events with minimal API server load
 
 ## Authentication
 
@@ -86,8 +85,7 @@ k8s-crondash/
       cronjobs.go      → ListCronJobs, GetCronJob, TriggerCronJob
       jobs.go          → ListJobs (child jobs of a cronjob)
     state/
-      store.go         → cached state store (sync.RWMutex + background sync)
-      informers.go     → client-go informer setup for CronJobs and Jobs
+      store.go         → cached state store (sync.RWMutex + polling goroutine)
     handlers/
       dashboard.go     → GET / (render full page), GET /cronjobs (HTMX partial)
       cronjob.go       → POST /trigger/:ns/:name (returns HTMX fragment)
@@ -177,14 +175,14 @@ The dashboard must signal when a job is already running for a CronJob:
 ## Health & Probes
 
 - `GET /healthz` — returns 200, confirms the HTTP server is running (no auth required)
-- `GET /readyz` — returns 200 only if the cache has been synced recently (last successful sync < 2× sync interval). Uses an atomic bool set by the background informer goroutine — no K8s API call per probe.
+- `GET /readyz` — returns 200 only if the cache has been synced recently (last successful poll < 2× poll interval). Uses an atomic bool set by the background polling goroutine — no K8s API call per probe.
 - Both wired as fiber routes, excluded from auth middleware
 - Helm chart configures `livenessProbe` and `readinessProbe` on these endpoints
 
 ## Graceful Shutdown
 
 - Listen for `SIGTERM` and `SIGINT` via `signal.NotifyContext`
-- On signal: stop the background informers, stop accepting new connections, drain in-flight requests (fiber `Shutdown()` with timeout)
+- On signal: stop the background polling goroutine, stop accepting new connections, drain in-flight requests (fiber `Shutdown()` with timeout)
 - Close k8s client connections cleanly
 
 ## Build & Dev Workflow
@@ -294,6 +292,7 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 ### Observability
 - Expandable rows showing job history
 - Job logs viewer (stream via API)
+- Upgrade state layer from polling to client-go informers for near-real-time updates
 
 ### UX
 - Namespace selector/filter
@@ -313,14 +312,16 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - [x] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth, `--help` shows all flags
 
 ### Phase 2 — K8s Client & Cached State
-- [ ] `internal/k8s/client.go` — client setup (in-cluster + kubeconfig fallback)
-- [ ] `internal/k8s/cronjobs.go` — `ListCronJobs` with child job status (running indicator)
-- [ ] `internal/k8s/jobs.go` — `ListJobs` (child jobs of a cronjob, matched via `ownerReferences`)
-- [ ] `internal/k8s/cronjobs.go` — `CronJobDisplay` struct
-- [ ] `internal/state/store.go` — cached state store (`sync.RWMutex`, `ListCronJobs` reads from cache)
-- [ ] `internal/state/informers.go` — client-go informer setup for CronJobs and Jobs, populates cache
-- [ ] Unit tests with `fake.NewClientset`
-- [ ] Checkpoint: can list cronjobs + running status from a real cluster
+- [x] Promote k8s.io/client-go to direct dep, add k8s.io/api + k8s.io/apimachinery, run just vendor
+- [x] `internal/k8s/client.go` — `NewClientSet` (in-cluster + kubeconfig fallback, structured logging)
+- [x] `internal/k8s/cronjobs.go` — `CronJobDisplay` struct (Name, Namespace, Schedule, Suspend, Running, LastSuccess, LastFailure, ActiveJobs) + `ListCronJobs` (enriches with child job status)
+- [x] `internal/k8s/jobs.go` — `ListJobs` (child jobs via `ownerReferences`) + `isJobRunning` helper
+- [x] `internal/state/store.go` — Store struct (`sync.RWMutex`, cache `[]CronJobDisplay`, `lastSync`, `ready atomic.Bool`) + `NewStore` (starts polling goroutine) + `ListCronJobs` (reads cache) + `IsReady`
+- [x] Wire `main.go` — create clientset, create store, update `/readyz` to check `store.IsReady()`, context cancellation stops polling
+- [x] Unit tests: `internal/k8s/cronjobs_test.go` + `jobs_test.go` using `fake.NewClientset`
+- [x] Unit tests: `internal/state/store_test.go` — cache reads, ready flag, stale data behavior
+- [x] Run `just fmt` + `just lint`
+- [x] Checkpoint: can list cronjobs + running status from a real cluster
 
 ### Phase 3 — Dashboard UI (Read-only)
 - [ ] `internal/views/layout.templ` — base HTML shell with missing.css + HTMX (CDN, integrity hashes)

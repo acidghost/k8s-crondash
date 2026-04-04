@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/acidghost/k8s-crondash/internal/config"
+	"github.com/acidghost/k8s-crondash/internal/k8s"
+	"github.com/acidghost/k8s-crondash/internal/state"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/basicauth"
 	"github.com/gofiber/fiber/v3/middleware/logger"
@@ -40,6 +42,17 @@ func main() {
 		AppName: "k8s-crondash",
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	clientset, err := k8s.NewClientSet("")
+	if err != nil {
+		slog.Error("failed to create Kubernetes client", "error", err)
+		os.Exit(1)
+	}
+
+	store := state.NewStore(ctx, clientset, cfg.Namespace, time.Duration(cfg.RefreshInterval)*time.Second, cfg.JobHistoryLimit)
+
 	app.Use(logger.New())
 
 	app.Get("/healthz", func(c fiber.Ctx) error {
@@ -47,7 +60,10 @@ func main() {
 	})
 
 	app.Get("/readyz", func(c fiber.Ctx) error {
-		return c.SendStatus(http.StatusOK)
+		if store.IsReady() {
+			return c.SendStatus(http.StatusOK)
+		}
+		return c.SendStatus(http.StatusServiceUnavailable)
 	})
 
 	app.Use(basicauth.New(basicauth.Config{
@@ -61,9 +77,6 @@ func main() {
 	app.Get("/", func(c fiber.Ctx) error {
 		return c.SendString("k8s-crondash dashboard")
 	})
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	slog.Info("listening", "addr", cfg.ListenAddr)
 

@@ -31,7 +31,7 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-func (c *Config) Validate(kctx *kong.Context) error {
+func (c *Config) Validate(_ *kong.Context) error {
 	var errs []error
 	if _, err := net.ResolveTCPAddr("tcp", c.ListenAddr); err != nil {
 		errs = append(errs, fmt.Errorf("listen-addr %q is not a valid host:port: %w", c.ListenAddr, err))
