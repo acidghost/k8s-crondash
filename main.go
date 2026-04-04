@@ -14,6 +14,7 @@ import (
 	"github.com/acidghost/k8s-crondash/internal/config"
 	"github.com/acidghost/k8s-crondash/internal/k8s"
 	"github.com/acidghost/k8s-crondash/internal/state"
+	"github.com/acidghost/k8s-crondash/internal/views"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/basicauth"
 	"github.com/gofiber/fiber/v3/middleware/logger"
@@ -75,7 +76,7 @@ func main() {
 	cfg.AuthPassword = ""
 
 	app.Get("/", func(c fiber.Ctx) error {
-		return c.SendString("k8s-crondash dashboard")
+		return views.Render(c, views.Index())
 	})
 
 	slog.Info("listening", "addr", cfg.ListenAddr)

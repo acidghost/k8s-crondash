@@ -1,0 +1,33 @@
+package views
+
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title }</title>
+			<link
+				rel="stylesheet"
+				href="https://unpkg.com/missing.css@1.2.0/dist/missing.min.css"
+				integrity="sha256-+bBeBYUh9+UNWDnPnXnxnT56osQnODQd6JzO8wZ9ZBo="
+				crossorigin="anonymous"
+			/>
+			<script
+				src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"
+				integrity="sha256-Iig+9oy3VFkU8KiKG97cclanA9HVgMHSVSF9ClDTExM="
+				crossorigin="anonymous"
+			></script>
+		</head>
+		<body>
+			<header>
+				<nav>
+					<h1><a href="/">{ title }</a></h1>
+				</nav>
+			</header>
+			<main>
+				{ children... }
+			</main>
+		</body>
+	</html>
+}

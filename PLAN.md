@@ -324,16 +324,16 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - [x] Checkpoint: can list cronjobs + running status from a real cluster
 
 ### Phase 3a — Templ Scaffold & Hello World
-- [ ] Create `internal/views/` package
-- [ ] `internal/views/layout.templ` — `Layout(title string)` base HTML shell: `<!DOCTYPE html>`, `<head>` with charset, viewport, title, missing.css CDN (pinned v1.2.0 with integrity hash), HTMX CDN (pinned version with integrity hash), `<body>` with app header + `{ children... }` content slot
-- [ ] `internal/views/index.templ` — minimal `Index()` component using `Layout("k8s-crondash")` with placeholder heading. Temporary — replaced by real dashboard template in Phase 3c.
-- [ ] `internal/views/render.go` — `Render(c fiber.Ctx, comp templ.Component) error` helper: sets `Content-Type: text/html`, calls `comp.Render(c.Context(), c.Response().BodyWriter())`. Needed because Fiber does not natively support templ components.
-- [ ] Wire `GET /` in `main.go` — replace placeholder `c.SendString("k8s-crondash dashboard")` with `views.Render(c, views.Index())`, import generated `views` package
-- [ ] Update `justfile` — make `build` recipe depend on `generate` (or `run` depend on both), so `.templ` files are always compiled before the binary
-- [ ] Run `just generate` → verify `_templ.go` files produced in `internal/views/`
-- [ ] Run `just vendor` → vendored deps include templ runtime (already in go.mod but vendor tree must reflect generated imports)
-- [ ] Run `just build` → verify full compilation
-- [ ] Checkpoint: `just run` → browser shows styled hello world page, missing.css applied, HTMX loaded (verify in dev tools network tab)
+- [x] Create `internal/views/` package
+- [x] `internal/views/layout.templ` — `Layout(title string)` base HTML shell: `<!DOCTYPE html>`, `<head>` with charset, viewport, title, missing.css CDN (pinned v1.2.0 with integrity hash), HTMX CDN (pinned version with integrity hash), `<body>` with app header + `{ children... }` content slot
+- [x] `internal/views/index.templ` — minimal `Index()` component using `Layout("k8s-crondash")` with placeholder heading. Temporary — replaced by real dashboard template in Phase 3c.
+- [x] `internal/views/render.go` — `Render(c fiber.Ctx, comp templ.Component) error` helper: sets `Content-Type: text/html`, calls `comp.Render(c.Context(), c.Response().BodyWriter())`. Needed because Fiber does not natively support templ components.
+- [x] Wire `GET /` in `main.go` — replace placeholder `c.SendString("k8s-crondash dashboard")` with `views.Render(c, views.Index())`, import generated `views` package
+- [x] Update `justfile` — make `build` recipe depend on `generate` (or `run` depend on both), so `.templ` files are always compiled before the binary
+- [x] Run `just generate` → verify `_templ.go` files produced in `internal/views/`
+- [x] Run `just vendor` → vendored deps include templ runtime (already in go.mod but vendor tree must reflect generated imports)
+- [x] Run `just build` → verify full compilation
+- [x] Checkpoint: `just run` → browser shows styled hello world page, missing.css applied, HTMX loaded (verify in dev tools network tab)
 
 ### Phase 3b — Handlers & Service Interface
 - [ ] Create `internal/handlers/` package

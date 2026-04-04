@@ -17,9 +17,6 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
 # Go workspace file
 go.work
 go.work.sum
@@ -33,3 +30,6 @@ go.work.sum
 
 # Build output
 /build
+
+# Generated files
+*_templ.go
