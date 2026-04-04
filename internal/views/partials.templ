@@ -40,10 +40,10 @@ templ statusChip(job k8s.CronJobDisplay) {
 	if job.Suspended {
 		<span class="chip warn"><span class="status-dot status-dot--warn"></span>Suspended</span>
 	}
-	if job.Running {
+	if !job.Suspended && job.ActiveJobs > 0 {
 		<span class="chip ok"><span class="status-dot status-dot--running"></span>Running</span>
 	}
-	if !job.Suspended && !job.Running {
+	if !job.Suspended && job.ActiveJobs == 0 {
 		<span class="chip plain"><span class="status-dot status-dot--plain"></span>Idle</span>
 	}
 }

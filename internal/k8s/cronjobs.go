@@ -16,7 +16,6 @@ type CronJobDisplay struct {
 	Namespace   string
 	Schedule    string
 	Suspended   bool
-	Running     bool
 	LastSuccess *time.Time
 	LastFailure *time.Time
 	ActiveJobs  int
@@ -58,7 +57,6 @@ func ListCronJobs(ctx context.Context, clientset kubernetes.Interface, namespace
 func processJobs(jobs []batchv1.Job, display *CronJobDisplay) {
 	for _, job := range jobs {
 		if isJobRunning(&job) {
-			display.Running = true
 			display.ActiveJobs++
 		}
 		for _, c := range job.Status.Conditions {

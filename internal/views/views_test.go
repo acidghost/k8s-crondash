@@ -96,7 +96,7 @@ func TestCronJobCards_RendersJobData(t *testing.T) {
 
 func TestCronJobCards_RunningChip(t *testing.T) {
 	jobs := []k8s.CronJobDisplay{
-		{Name: "running-job", Running: true, ActiveJobs: 2},
+		{Name: "running-job", ActiveJobs: 2},
 	}
 	html := renderToString(t, CronJobCards(jobs, false))
 

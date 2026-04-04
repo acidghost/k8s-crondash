@@ -35,7 +35,7 @@ func TestIndex_Returns200WithCards(t *testing.T) {
 	now := time.Now()
 	svc := &mockService{
 		jobs: []k8s.CronJobDisplay{
-			{Name: "my-cron", Namespace: "default", Schedule: "*/5 * * * *", Running: true, ActiveJobs: 1, LastSuccess: &now},
+			{Name: "my-cron", Namespace: "default", Schedule: "*/5 * * * *", ActiveJobs: 1, LastSuccess: &now},
 		},
 	}
 	app := setupApp(svc)
