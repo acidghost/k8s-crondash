@@ -323,16 +323,39 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - [x] Run `just fmt` + `just lint`
 - [x] Checkpoint: can list cronjobs + running status from a real cluster
 
-### Phase 3 — Dashboard UI (Read-only)
-- [ ] `internal/views/layout.templ` — base HTML shell with missing.css + HTMX (CDN, integrity hashes)
-- [ ] `internal/views/dashboard.templ` — cronjob table (name, namespace, schedule, suspended, running, last success, last failure). Namespace column conditionally visible.
-- [ ] `internal/views/partials.templ` — table body partial for HTMX swap
-- [ ] `internal/handlers/interface.go` — `CronJobService` interface
-- [ ] `internal/handlers/dashboard.go` — `GET /` (full page), `GET /cronjobs` (HTMX partial, reads from cache)
-- [ ] Auto-refresh via HTMX polling (`hx-trigger="every ${REFRESH_INTERVAL}s"`, configurable)
-- [ ] Handler unit tests (mocked `CronJobService`)
-- [ ] templ view tests (`ExecuteToString` + assertions)
-- [ ] Checkpoint: open browser, see live cronjob table auto-refreshing
+### Phase 3a — Templ Scaffold & Hello World
+- [ ] Create `internal/views/` package
+- [ ] `internal/views/layout.templ` — `Layout(title string)` base HTML shell: `<!DOCTYPE html>`, `<head>` with charset, viewport, title, missing.css CDN (pinned v1.2.0 with integrity hash), HTMX CDN (pinned version with integrity hash), `<body>` with app header + `{ children... }` content slot
+- [ ] `internal/views/index.templ` — minimal `Index()` component using `Layout("k8s-crondash")` with placeholder heading. Temporary — replaced by real dashboard template in Phase 3c.
+- [ ] `internal/views/render.go` — `Render(c fiber.Ctx, comp templ.Component) error` helper: sets `Content-Type: text/html`, calls `comp.Render(c.Context(), c.Response().BodyWriter())`. Needed because Fiber does not natively support templ components.
+- [ ] Wire `GET /` in `main.go` — replace placeholder `c.SendString("k8s-crondash dashboard")` with `views.Render(c, views.Index())`, import generated `views` package
+- [ ] Update `justfile` — make `build` recipe depend on `generate` (or `run` depend on both), so `.templ` files are always compiled before the binary
+- [ ] Run `just generate` → verify `_templ.go` files produced in `internal/views/`
+- [ ] Run `just vendor` → vendored deps include templ runtime (already in go.mod but vendor tree must reflect generated imports)
+- [ ] Run `just build` → verify full compilation
+- [ ] Checkpoint: `just run` → browser shows styled hello world page, missing.css applied, HTMX loaded (verify in dev tools network tab)
+
+### Phase 3b — Handlers & Service Interface
+- [ ] Create `internal/handlers/` package
+- [ ] `internal/handlers/interface.go` — `CronJobService` interface with `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` (only methods consumed by read-only dashboard; `TriggerCronJob` added in Phase 4)
+- [ ] Refactor `internal/state/store.go` — change `ListCronJobs()` signature to `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` to satisfy `CronJobService` interface (returns cached data; ctx reserved for future use; error always nil for cache reads). Update `store_test.go` callers accordingly.
+- [ ] `internal/handlers/dashboard.go` — `DashboardHandler` struct (fields: `service CronJobService`, `refreshInterval int`, `showNamespace bool`) + `NewDashboardHandler(service CronJobService, refreshInterval int, showNamespace bool) *DashboardHandler`
+  - `Index(c fiber.Ctx) error` — calls `service.ListCronJobs(c.Context())`, renders full page (still hello world template from 3a; real dashboard UI in Phase 3c)
+  - `CronJobs(c fiber.Ctx) error` — calls `service.ListCronJobs(c.Context())`, returns simple HTML/text response showing cronjob count (proves route + data flow through interface)
+- [ ] Wire in `main.go` — construct `handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "")`, register `app.Get("/", handler.Index)` + `app.Get("/cronjobs", handler.CronJobs)`, remove old inline `GET /` handler
+- [ ] Compile-time interface assertion: `var _ handlers.CronJobService = (*state.Store)(nil)` in `main.go` or `store.go`
+- [ ] Run `just build` + manual test: `curl -u user:pass http://localhost:3000/` returns HTML, `curl -u user:pass http://localhost:3000/cronjobs` returns data from store
+- [ ] Checkpoint: route structure matches architecture diagram, handlers decoupled from K8s via interface, data flows through `CronJobService` → handler → response
+
+### Phase 3c — Dashboard Table, Partials & Auto-Refresh
+- [ ] `internal/views/dashboard.templ` — `Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int)` full-page component using `Layout`: `<table>` with columns (name, namespace [conditional on `showNamespace`], schedule, suspended, running, last success, last failure). Container `<div>` wraps `<tbody>` with HTMX attributes: `hx-get="/cronjobs"`, `hx-trigger="every ${refreshInterval}s"`, `hx-swap="innerHTML"`
+- [ ] `internal/views/partials.templ` — `CronJobTableBody(jobs []k8s.CronJobDisplay, showNamespace bool)` renders `<tbody>` with one `<tr>` per CronJob (status badges for suspended/running, formatted timestamps, active job count); `EmptyState(namespace string)` renders "No CronJobs found in namespace [namespace]" message
+- [ ] Remove `internal/views/index.templ` — replaced by `dashboard.templ`
+- [ ] Update `internal/handlers/dashboard.go` — `Index` renders `views.Dashboard(jobs, showNamespace, refreshInterval)`; `CronJobs` renders `views.CronJobTableBody(jobs, showNamespace)` (or `views.EmptyState` when `len(jobs) == 0`); handle service errors (return 500)
+- [ ] `internal/handlers/dashboard_test.go` — handler unit tests with mock `CronJobService`: `GET /` returns 200 with table HTML, `GET /cronjobs` returns partial `<tbody>`, empty data returns empty state, service error returns 500. Use Fiber test utilities + `httptest`.
+- [ ] `internal/views/views_test.go` — templ view tests: `templ.ExecuteToString()` + substring assertions for `Dashboard` (table headers, namespace column conditional), `CronJobTableBody` (data cells, status badges), `EmptyState` (correct message text)
+- [ ] Run `just fmt` + `just lint` + `just test`
+- [ ] Checkpoint: open browser, see live cronjob table auto-refreshing; `curl /cronjobs` returns table body partial
 
 ### Phase 4 — Manual Trigger
 - [ ] `internal/k8s/cronjobs.go` — `TriggerCronJob` (create Job from CronJob spec, explicit concurrency check via active child Jobs)
