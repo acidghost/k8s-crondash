@@ -336,16 +336,16 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - [x] Checkpoint: `just run` → browser shows styled hello world page, missing.css applied, HTMX loaded (verify in dev tools network tab)
 
 ### Phase 3b — Handlers & Service Interface
-- [ ] Create `internal/handlers/` package
-- [ ] `internal/handlers/interface.go` — `CronJobService` interface with `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` (only methods consumed by read-only dashboard; `TriggerCronJob` added in Phase 4)
-- [ ] Refactor `internal/state/store.go` — change `ListCronJobs()` signature to `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` to satisfy `CronJobService` interface (returns cached data; ctx reserved for future use; error always nil for cache reads). Update `store_test.go` callers accordingly.
-- [ ] `internal/handlers/dashboard.go` — `DashboardHandler` struct (fields: `service CronJobService`, `refreshInterval int`, `showNamespace bool`) + `NewDashboardHandler(service CronJobService, refreshInterval int, showNamespace bool) *DashboardHandler`
+- [x] Create `internal/handlers/` package
+- [x] `internal/handlers/interface.go` — `CronJobService` interface with `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` (only methods consumed by read-only dashboard; `TriggerCronJob` added in Phase 4)
+- [x] Refactor `internal/state/store.go` — change `ListCronJobs()` signature to `ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)` to satisfy `CronJobService` interface (returns cached data; ctx reserved for future use; error always nil for cache reads). Update `store_test.go` callers accordingly.
+- [x] `internal/handlers/dashboard.go` — `DashboardHandler` struct (fields: `service CronJobService`, `refreshInterval int`, `showNamespace bool`) + `NewDashboardHandler(service CronJobService, refreshInterval int, showNamespace bool) *DashboardHandler`
   - `Index(c fiber.Ctx) error` — calls `service.ListCronJobs(c.Context())`, renders full page (still hello world template from 3a; real dashboard UI in Phase 3c)
   - `CronJobs(c fiber.Ctx) error` — calls `service.ListCronJobs(c.Context())`, returns simple HTML/text response showing cronjob count (proves route + data flow through interface)
-- [ ] Wire in `main.go` — construct `handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "")`, register `app.Get("/", handler.Index)` + `app.Get("/cronjobs", handler.CronJobs)`, remove old inline `GET /` handler
-- [ ] Compile-time interface assertion: `var _ handlers.CronJobService = (*state.Store)(nil)` in `main.go` or `store.go`
-- [ ] Run `just build` + manual test: `curl -u user:pass http://localhost:3000/` returns HTML, `curl -u user:pass http://localhost:3000/cronjobs` returns data from store
-- [ ] Checkpoint: route structure matches architecture diagram, handlers decoupled from K8s via interface, data flows through `CronJobService` → handler → response
+- [x] Wire in `main.go` — construct `handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "")`, register `app.Get("/", handler.Index)` + `app.Get("/cronjobs", handler.CronJobs)`, remove old inline `GET /` handler
+- [x] Compile-time interface assertion: `var _ handlers.CronJobService = (*state.Store)(nil)` in `main.go` or `store.go`
+- [x] Run `just build` + manual test: `curl -u user:pass http://localhost:3000/` returns HTML, `curl -u user:pass http://localhost:3000/cronjobs` returns data from store
+- [x] Checkpoint: route structure matches architecture diagram, handlers decoupled from K8s via interface, data flows through `CronJobService` → handler → response
 
 ### Phase 3c — Dashboard Table, Partials & Auto-Refresh
 - [ ] `internal/views/dashboard.templ` — `Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int)` full-page component using `Layout`: `<table>` with columns (name, namespace [conditional on `showNamespace`], schedule, suspended, running, last success, last failure). Container `<div>` wraps `<tbody>` with HTMX attributes: `hx-get="/cronjobs"`, `hx-trigger="every ${refreshInterval}s"`, `hx-swap="innerHTML"`

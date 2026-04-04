@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/acidghost/k8s-crondash/internal/config"
+	"github.com/acidghost/k8s-crondash/internal/handlers"
 	"github.com/acidghost/k8s-crondash/internal/k8s"
 	"github.com/acidghost/k8s-crondash/internal/state"
-	"github.com/acidghost/k8s-crondash/internal/views"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/basicauth"
 	"github.com/gofiber/fiber/v3/middleware/logger"
@@ -25,6 +25,8 @@ var (
 	buildCommit  string
 	buildDate    string
 )
+
+var _ handlers.CronJobService = (*state.Store)(nil)
 
 func main() {
 	slog.Info("starting k8s-crondash",
@@ -75,9 +77,9 @@ func main() {
 
 	cfg.AuthPassword = ""
 
-	app.Get("/", func(c fiber.Ctx) error {
-		return views.Render(c, views.Index())
-	})
+	dashboardHandler := handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "")
+	app.Get("/", dashboardHandler.Index)
+	app.Get("/cronjobs", dashboardHandler.CronJobs)
 
 	slog.Info("listening", "addr", cfg.ListenAddr)
 

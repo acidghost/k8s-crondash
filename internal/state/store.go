@@ -35,12 +35,12 @@ func NewStore(ctx context.Context, clientset kubernetes.Interface, namespace str
 	return s
 }
 
-func (s *Store) ListCronJobs() []k8s.CronJobDisplay {
+func (s *Store) ListCronJobs(_ context.Context) ([]k8s.CronJobDisplay, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]k8s.CronJobDisplay, len(s.cache))
 	copy(out, s.cache)
-	return out
+	return out, nil
 }
 
 func (s *Store) IsReady() bool {

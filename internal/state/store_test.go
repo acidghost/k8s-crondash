@@ -51,7 +51,10 @@ func TestStore_ListCronJobs_ReturnsData(t *testing.T) {
 	store := NewStore(ctx, clientset, "default", 50*time.Millisecond, 5)
 
 	for i := 0; i < 50; i++ {
-		jobs := store.ListCronJobs()
+		jobs, err := store.ListCronJobs(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if len(jobs) > 0 {
 			if jobs[0].Name != "test-cj" {
 				t.Errorf("expected name test-cj, got %s", jobs[0].Name)
@@ -77,8 +80,8 @@ func TestStore_ListCronJobs_ReturnsCopy(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	a := store.ListCronJobs()
-	b := store.ListCronJobs()
+	a, _ := store.ListCronJobs(context.Background())
+	b, _ := store.ListCronJobs(context.Background())
 
 	if len(a) != len(b) {
 		t.Fatalf("expected same length, got %d and %d", len(a), len(b))
