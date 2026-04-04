@@ -36,5 +36,5 @@ func (h *DashboardHandler) CronJobs(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).SendString("failed to load cronjobs")
 	}
-	return views.Render(c, views.CronJobTableBody(jobs, h.showNamespace))
+	return views.Render(c, views.CronJobCards(jobs, h.showNamespace))
 }

@@ -14,6 +14,16 @@ templ Layout(title string) {
 				crossorigin="anonymous"
 			/>
 			<script src="https://unpkg.com/htmx.org@2.0.8/dist/htmx.min.js" integrity="sha256-Iig+9oy3VFkU8KiKG97cclanA9HVgMHSVSF9ClDTExM=" crossorigin="anonymous"></script>
+			<style>
+				@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+				.status-dot { width: .5rem; height: .5rem; border-radius: 50%; display: inline-block; margin-inline-end: .4em; }
+				.status-dot--ok { background-color: var(--ok-fg); }
+				.status-dot--warn { background-color: var(--warn-fg); }
+				.status-dot--bad { background-color: var(--bad-fg); }
+				.status-dot--plain { background-color: var(--muted-fg); }
+				.status-dot--running { background-color: var(--ok-fg); animation: pulse 2s ease-in-out infinite; }
+				.cronjob-card h2 { margin: 0; font-size: 1.1rem; }
+			</style>
 		</head>
 		<body>
 			<header>

@@ -7,41 +7,51 @@ import (
 	"github.com/acidghost/k8s-crondash/internal/k8s"
 )
 
-templ CronJobTableBody(jobs []k8s.CronJobDisplay, showNamespace bool) {
+templ CronJobCards(jobs []k8s.CronJobDisplay, showNamespace bool) {
 	for _, job := range jobs {
-		<tr>
-			<td>{ job.Name }</td>
-			if showNamespace {
-				<td>{ job.Namespace }</td>
-			}
-			<td><code>{ job.Schedule }</code></td>
-			<td>
-				if job.Suspended {
-					<span class="badge" style="background:var(--warning);color:#000">Suspended</span>
-				}
-				if job.Running {
-					<span class="badge" style="background:var(--success);color:#000">Running</span>
-				}
-				if !job.Suspended && !job.Running {
-					<span class="badge" style="background:var(--muted);color:#000">Idle</span>
-				}
-			</td>
-			<td>{ formatTime(job.LastSuccess) }</td>
-			<td>{ formatTime(job.LastFailure) }</td>
-			<td>{ fmt.Sprintf("%d", job.ActiveJobs) }</td>
-		</tr>
+		@cronJobCard(job, showNamespace)
 	}
 	if len(jobs) == 0 {
-		<tr>
-			<td colspan="7" style="text-align:center">No CronJobs found</td>
-		</tr>
+		@EmptyState("")
+	}
+}
+
+templ cronJobCard(job k8s.CronJobDisplay, showNamespace bool) {
+	<div class="box cronjob-card">
+		<div class="flex-row justify-content:space-between align-items:center">
+			<h2 class="bold">{ job.Name }</h2>
+			@statusChip(job)
+		</div>
+		if showNamespace {
+			<p class="secondary-font" style="margin-block-start:0"><span class="mono-font">{ job.Namespace }</span></p>
+		}
+		<div class="flex-row justify-content:space-between" style="margin-block-start:var(--density, 1rem)">
+			<span class="mono-font secondary-font">{ job.Schedule }</span>
+			<span class="secondary-font">{ fmt.Sprintf("%d active", job.ActiveJobs) }</span>
+		</div>
+		<div class="flex-row justify-content:space-between" style="margin-block-start:var(--density, 1rem)">
+			<span class="secondary-font">✓ { formatTime(job.LastSuccess) }</span>
+			<span class="secondary-font">✗ { formatTime(job.LastFailure) }</span>
+		</div>
+	</div>
+}
+
+templ statusChip(job k8s.CronJobDisplay) {
+	if job.Suspended {
+		<span class="chip warn"><span class="status-dot status-dot--warn"></span>Suspended</span>
+	}
+	if job.Running {
+		<span class="chip ok"><span class="status-dot status-dot--running"></span>Running</span>
+	}
+	if !job.Suspended && !job.Running {
+		<span class="chip plain"><span class="status-dot status-dot--plain"></span>Idle</span>
 	}
 }
 
 templ EmptyState(namespace string) {
-	<div style="text-align:center;padding:2rem">
+	<div class="box plain center">
 		<p>No CronJobs found in namespace <strong>{ namespaceLabel(namespace) }</strong>.</p>
-		<p style="color:var(--muted)">CronJobs will appear here once they are created in the cluster.</p>
+		<p style="color:var(--muted-fg)">CronJobs will appear here once they are created in the cluster.</p>
 	</div>
 }
 

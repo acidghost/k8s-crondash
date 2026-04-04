@@ -31,7 +31,7 @@ func setupApp(svc CronJobService) *fiber.App {
 	return app
 }
 
-func TestIndex_Returns200WithTable(t *testing.T) {
+func TestIndex_Returns200WithCards(t *testing.T) {
 	now := time.Now()
 	svc := &mockService{
 		jobs: []k8s.CronJobDisplay{
@@ -60,8 +60,8 @@ func TestIndex_Returns200WithTable(t *testing.T) {
 	if !strings.Contains(html, "*/5 * * * *") {
 		t.Error("response should contain schedule")
 	}
-	if !strings.Contains(html, "<table") {
-		t.Error("response should contain table element")
+	if !strings.Contains(html, "class=\"grid spacious\"") {
+		t.Error("response should contain grid element")
 	}
 	if !strings.Contains(html, "Running") {
 		t.Error("response should show Running badge")
@@ -91,7 +91,7 @@ func TestIndex_EmptyData_ShowsEmptyState(t *testing.T) {
 	}
 }
 
-func TestCronJobs_ReturnsTableBody(t *testing.T) {
+func TestCronJobs_ReturnsCards(t *testing.T) {
 	svc := &mockService{
 		jobs: []k8s.CronJobDisplay{
 			{Name: "job-a", Namespace: "ns1", Schedule: "0 * * * *"},
@@ -114,8 +114,8 @@ func TestCronJobs_ReturnsTableBody(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
-	if !strings.Contains(html, "<tr") {
-		t.Error("response should contain table rows")
+	if !strings.Contains(html, "cronjob-card") {
+		t.Error("response should contain cronjob card elements")
 	}
 	if !strings.Contains(html, "job-a") {
 		t.Error("response should contain job-a")

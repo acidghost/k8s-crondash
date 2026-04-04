@@ -357,6 +357,31 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - [x] Run `just fmt` + `just lint` + `just test`
 - [x] Checkpoint: open browser, see live cronjob table auto-refreshing; `curl /cronjobs` returns table body partial
 
+### Phase 3d — Modern Card-Based Dashboard (Visual Redesign)
+
+Replace the plain `<table>` layout with a responsive card grid using missing.css utility classes. No external CSS file — a tiny `<style>` block in `layout.templ` for the pulse animation is the only addition.
+
+Design principles:
+- **Cards over rows** — each CronJob is a `.box` card in a `.grid` layout, responsive via `data-cols` (`data-cols@s="1"` mobile, `data-cols@l="3"` desktop)
+- **Visual hierarchy** — `.bold` on name, `.mono-font .secondary-font` on schedule, colorway chips (`.chip.ok`/`.warn`/`.bad`/`.plain`) for status instead of inline styles
+- **Status dots** — small colored dot (`●`) before status text, pulsing animation for running jobs
+- **Dark mode** — free from missing.css via `prefers-color-scheme`
+- **Clean empty state** — `.box.plain .center` with friendly message
+
+Changes:
+
+- [x] `internal/views/layout.templ` — add `<style>` block in `<head>` with: `@keyframes pulse` animation, `.status-dot` (`.status-dot--ok`, `--warn`, `--bad`, `--running`) rules (~10 lines total)
+- [x] `internal/views/dashboard.templ` — replace `<table>` with `<div class="grid spacious" data-cols@s="1" data-cols@l="3">` wrapping `CronJobCards` partial; keep HTMX poll attributes on the grid container (`hx-get="/cronjobs"`, `hx-trigger`, `hx-swap="innerHTML"`)
+- [x] `internal/views/partials.templ` —
+  - Add `CronJobCards(jobs []k8s.CronJobDisplay, showNamespace bool)` rendering one `.box` card per CronJob using missing.css classes: `.flex-row` for card header (name + status chip), `.mono-font` for schedule, `formatTime` for timestamps, status dot + `.chip.ok`/`.warn`/`.bad`/`.plain` badges
+  - Remove `CronJobTableBody` (replaced by `CronJobCards`)
+  - Keep `EmptyState` — restyle with `.box.plain .center`
+- [x] Update `internal/handlers/dashboard.go` — `CronJobs` handler renders `views.CronJobCards(jobs, showNamespace)` (or `views.EmptyState` when `len(jobs) == 0`)
+- [x] Update `internal/views/views_test.go` — adapt tests from table assertions to card assertions (`.box` presence, `.chip.ok`/`.warn` classes, formatted time output)
+- [x] Update `internal/handlers/dashboard_test.go` — update substring assertions to match new card HTML structure instead of `<table>`/`<tr>`/`<td>`
+- [x] Run `just fmt` + `just lint` + `just test`
+- [x] Checkpoint: open browser, see responsive card grid with status dots, chips; resize to mobile → single column; verify dark mode via OS toggle
+
 ### Phase 4 — Manual Trigger
 - [ ] `internal/k8s/cronjobs.go` — `TriggerCronJob` (create Job from CronJob spec, explicit concurrency check via active child Jobs)
 - [ ] `internal/views/partials.templ` — confirmation modal + toast/feedback

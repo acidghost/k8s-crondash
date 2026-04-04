@@ -20,35 +20,16 @@ func renderToString(t *testing.T, comp templ.Component) string {
 	return buf.String()
 }
 
-func TestDashboard_ContainsTableHeaders(t *testing.T) {
+func TestDashboard_ContainsCardGrid(t *testing.T) {
 	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, ""))
-	if !strings.Contains(html, "<th>Name</th>") {
-		t.Error("should contain Name header")
+	if !strings.Contains(html, `class="grid spacious"`) {
+		t.Error("should contain grid class")
 	}
-	if !strings.Contains(html, "<th>Schedule</th>") {
-		t.Error("should contain Schedule header")
+	if !strings.Contains(html, `data-cols@s="1"`) {
+		t.Error("should contain responsive small cols")
 	}
-	if !strings.Contains(html, "<th>Namespace</th>") {
-		t.Error("should contain Namespace header when showNamespace=true")
-	}
-	if !strings.Contains(html, "<th>Status</th>") {
-		t.Error("should contain Status header")
-	}
-	if !strings.Contains(html, "<th>Last Success</th>") {
-		t.Error("should contain Last Success header")
-	}
-	if !strings.Contains(html, "<th>Last Failure</th>") {
-		t.Error("should contain Last Failure header")
-	}
-	if !strings.Contains(html, "<th>Active Jobs</th>") {
-		t.Error("should contain Active Jobs header")
-	}
-}
-
-func TestDashboard_NamespaceColumnHidden(t *testing.T) {
-	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, false, 5, ""))
-	if strings.Contains(html, "<th>Namespace</th>") {
-		t.Error("should NOT contain Namespace header when showNamespace=false")
+	if !strings.Contains(html, `data-cols@l="3"`) {
+		t.Error("should contain responsive large cols")
 	}
 }
 
@@ -82,8 +63,8 @@ func TestDashboard_EmptyData_AllNamespaces(t *testing.T) {
 	}
 }
 
-func TestCronJobTableBody_RendersJobData(t *testing.T) {
-	now := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
+func TestCronJobCards_RendersJobData(t *testing.T) {
+	now := time.Now().Add(-5 * time.Minute)
 	jobs := []k8s.CronJobDisplay{
 		{
 			Name:        "backup-job",
@@ -94,7 +75,7 @@ func TestCronJobTableBody_RendersJobData(t *testing.T) {
 			LastSuccess: &now,
 		},
 	}
-	html := renderToString(t, CronJobTableBody(jobs, true))
+	html := renderToString(t, CronJobCards(jobs, true))
 
 	if !strings.Contains(html, "backup-job") {
 		t.Error("should contain job name")
@@ -106,61 +87,85 @@ func TestCronJobTableBody_RendersJobData(t *testing.T) {
 		t.Error("should contain schedule")
 	}
 	if !strings.Contains(html, "Suspended") {
-		t.Error("should show Suspended badge")
+		t.Error("should show Suspended chip")
 	}
-	if !strings.Contains(html, "2025-01-15 10:30:00") {
-		t.Error("should format last success time")
+	if !strings.Contains(html, "chip warn") {
+		t.Error("suspended job should have chip warn class")
 	}
 }
 
-func TestCronJobTableBody_RunningBadge(t *testing.T) {
+func TestCronJobCards_RunningChip(t *testing.T) {
 	jobs := []k8s.CronJobDisplay{
 		{Name: "running-job", Running: true, ActiveJobs: 2},
 	}
-	html := renderToString(t, CronJobTableBody(jobs, false))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if !strings.Contains(html, "Running") {
-		t.Error("should show Running badge")
+		t.Error("should show Running chip")
+	}
+	if !strings.Contains(html, "chip ok") {
+		t.Error("running job should have chip ok class")
+	}
+	if !strings.Contains(html, "status-dot--running") {
+		t.Error("running job should have pulsing dot")
+	}
+	if !strings.Contains(html, "2 active") {
+		t.Error("should show active job count")
 	}
 }
 
-func TestCronJobTableBody_IdleBadge(t *testing.T) {
+func TestCronJobCards_IdleChip(t *testing.T) {
 	jobs := []k8s.CronJobDisplay{
 		{Name: "idle-job"},
 	}
-	html := renderToString(t, CronJobTableBody(jobs, false))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if !strings.Contains(html, "Idle") {
-		t.Error("should show Idle badge for non-suspended, non-running jobs")
+		t.Error("should show Idle chip for non-suspended, non-running jobs")
+	}
+	if !strings.Contains(html, "chip plain") {
+		t.Error("idle job should have chip plain class")
 	}
 }
 
-func TestCronJobTableBody_NamespaceHidden(t *testing.T) {
+func TestCronJobCards_NamespaceHidden(t *testing.T) {
 	jobs := []k8s.CronJobDisplay{
 		{Name: "job-a", Namespace: "secret-ns"},
 	}
-	html := renderToString(t, CronJobTableBody(jobs, false))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if strings.Contains(html, "secret-ns") {
 		t.Error("should NOT contain namespace when showNamespace=false")
 	}
 }
 
-func TestCronJobTableBody_NilTimes(t *testing.T) {
+func TestCronJobCards_NilTimes(t *testing.T) {
 	jobs := []k8s.CronJobDisplay{
 		{Name: "fresh-job", LastSuccess: nil, LastFailure: nil},
 	}
-	html := renderToString(t, CronJobTableBody(jobs, false))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if !strings.Contains(html, "—") {
 		t.Error("nil times should render as dash")
 	}
 }
 
-func TestCronJobTableBody_Empty(t *testing.T) {
-	html := renderToString(t, CronJobTableBody([]k8s.CronJobDisplay{}, false))
+func TestCronJobCards_Empty(t *testing.T) {
+	html := renderToString(t, CronJobCards([]k8s.CronJobDisplay{}, false))
 	if !strings.Contains(html, "No CronJobs found") {
-		t.Error("empty table body should show no data message")
+		t.Error("empty cards should show no data message")
+	}
+}
+
+func TestCronJobCards_FormattedTime(t *testing.T) {
+	ts := time.Date(2025, 3, 15, 10, 30, 0, 0, time.UTC)
+	jobs := []k8s.CronJobDisplay{
+		{Name: "test-job", LastSuccess: &ts},
+	}
+	html := renderToString(t, CronJobCards(jobs, false))
+
+	if !strings.Contains(html, "2025-03-15 10:30:00") {
+		t.Error("should format last success time")
 	}
 }
 

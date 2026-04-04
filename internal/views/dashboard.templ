@@ -9,29 +9,17 @@ import (
 templ Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int, namespace string) {
 	@Layout("k8s-crondash") {
 		<div class="container">
-			<table>
-				<thead>
-					<tr>
-						<th>Name</th>
-						if showNamespace {
-							<th>Namespace</th>
-						}
-						<th>Schedule</th>
-						<th>Status</th>
-						<th>Last Success</th>
-						<th>Last Failure</th>
-						<th>Active Jobs</th>
-					</tr>
-				</thead>
-				<tbody
-					id="cronjob-table-body"
-					hx-get="/cronjobs"
-					hx-trigger={ fmt.Sprintf("every %ds", refreshInterval) }
-					hx-swap="innerHTML"
-				>
-					@CronJobTableBody(jobs, showNamespace)
-				</tbody>
-			</table>
+			<div
+				id="cronjob-cards"
+				class="grid spacious"
+				data-cols@s="1"
+				data-cols@l="3"
+				hx-get="/cronjobs"
+				hx-trigger={ fmt.Sprintf("every %ds", refreshInterval) }
+				hx-swap="innerHTML"
+			>
+				@CronJobCards(jobs, showNamespace)
+			</div>
 			if len(jobs) == 0 {
 				@EmptyState(namespace)
 			}
