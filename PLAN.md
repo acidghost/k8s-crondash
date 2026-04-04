@@ -1,0 +1,348 @@
+# k8s-crondash — Plan
+
+## Overview
+
+Web dashboard for watching Kubernetes CronJobs, displaying their status, and manually triggering them.
+
+**Tech stack:** Go, GoFiber v3, templ, HTMX
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                   Browser                        │
+│   templ-rendered HTML + HTMX interactivity       │
+└──────────────┬──────────────────────────────────┘
+               │ HTTP (Basic Auth)
+┌──────────────▼──────────────────────────────────┐
+│              GoFiber v3 (HTTP server)             │
+│  Middleware:                                      │
+│    Basic Auth (AUTH_USERNAME / AUTH_PASSWORD)     │
+│  Routes:                                         │
+│    GET  /healthz            → liveness probe      │
+│    GET  /readyz             → readiness probe      │
+│    GET  /                   → dashboard            │
+│    GET  /cronjobs           → cronjob table (HTMX) │
+│    POST /trigger/:ns/:name  → manual trigger       │
+└──────────────┬──────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────┐
+│           Internal packages                      │
+│                                                  │
+│  state/    → cached K8s state (informers +       │
+│              background sync, serves all reads)   │
+│                                                  │
+│  k8s/      → thin wrapper around client-go       │
+│              list cronjobs, create manual jobs    │
+│                                                  │
+│  handlers/ → fiber route handlers                │
+│              (own interface for k8s service)      │
+│  views/    → templ templates                     │
+└─────────────────────────────────────────────────┘
+```
+
+### Why a Cache/State Layer?
+
+Without it, every HTMX poll from every browser hits the K8s API directly — N users × 1 request per `REFRESH_INTERVAL` seconds. A background goroutine (backed by client-go informers) syncs state once, and all HTTP handlers read from a `sync.RWMutex`-guarded cache. This:
+
+- Eliminates thundering-herd API calls
+- Makes "connection lost" detection trivial (track last successful sync timestamp)
+- Provides near-real-time state via informer events with minimal API server load
+
+## Authentication
+
+- **Basic Auth (MVP):** `AUTH_USERNAME` and `AUTH_PASSWORD` env vars required. Fiber middleware validates credentials on every request except `/healthz` and `/readyz` (probe endpoints must be unauthenticated for kubelet).
+- **Startup validation:** app refuses to start if `AUTH_USERNAME` or `AUTH_PASSWORD` is empty or not set.
+- **K8s auth** (separate concern):
+  - **Primary:** In-cluster (service account) — for production deployment
+  - **Fallback:** Kubeconfig file (`~/.kube/config` or `KUBECONFIG` env var) — for local dev
+  - Auto-detect: attempt in-cluster first, fall back to kubeconfig
+
+## Configuration
+
+All config via environment variables with sensible defaults. Ad-hoc `internal/config` package with a `Config` struct and `Validate() error` method — fails fast on invalid/missing values at startup.
+
+| Env Var | Default | Description |
+|---|---|---|
+| `LISTEN_ADDR` | `:3000` | HTTP listen address |
+| `NAMESPACE` | (empty = all) | Namespace to watch; empty watches all |
+| `KUBECONFIG` | `~/.kube/config` | Path to kubeconfig (dev only) |
+| `REFRESH_INTERVAL` | `5` | HTMX poll interval in seconds |
+| `JOB_HISTORY_LIMIT` | `5` | Max child jobs to fetch per cronjob |
+| `AUTH_USERNAME` | (required) | Basic auth username |
+| `AUTH_PASSWORD` | (required) | Basic auth password |
+
+## Package Layout
+
+```
+k8s-crondash/
+  main.go              → wire everything, load config, start server
+  internal/
+    config/
+      config.go        → Config struct, Load(), Validate() from env vars
+    k8s/
+      client.go        → k8s client setup (in-cluster + kubeconfig fallback)
+      cronjobs.go      → ListCronJobs, GetCronJob, TriggerCronJob
+      jobs.go          → ListJobs (child jobs of a cronjob)
+    state/
+      store.go         → cached state store (sync.RWMutex + background sync)
+      informers.go     → client-go informer setup for CronJobs and Jobs
+    handlers/
+      dashboard.go     → GET / (render full page), GET /cronjobs (HTMX partial)
+      cronjob.go       → POST /trigger/:ns/:name (returns HTMX fragment)
+      interface.go     → CronJobService interface (owned by consumer)
+    views/
+      layout.templ     → base HTML shell (head, nav, scripts)
+      dashboard.templ  → cronjob table/grid
+      partials.templ   → row updates, job list panel, toasts
+```
+
+### Interface Between Handlers and K8s
+
+Handlers own the interface (consumer-defined):
+
+```go
+// internal/handlers/interface.go
+type CronJobService interface {
+    ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)
+    TriggerCronJob(ctx context.Context, ns, name string) error
+}
+```
+
+The `state.Store` implements this interface. Handler tests inject a mock. `k8s/` remains a concrete package with no handler knowledge.
+
+### CronJobDisplay Struct
+
+`CronJobDisplay` lives in `internal/k8s/cronjobs.go` (where it's produced). Extract to a shared package only if a second consumer needs it later.
+
+## Logging
+
+Structured logging via `log/slog` (stdlib since Go 1.21). All handler and K8s operations log with request-scoped fields:
+
+- Handler middleware injects `namespace`, `cronjob_name`, `method`, `path` into the slog context
+- K8s operations log with `component=k8s`, `operation`, duration
+- Trigger operations log with `component=trigger`, `namespace`, `name`, `success`
+
+No external logging library — `slog` is sufficient for this scope.
+
+## Dependencies
+
+- `github.com/gofiber/fiber/v3` — HTTP server
+- `github.com/a-h/templ` — typed HTML templates
+- `k8s.io/client-go` — Kubernetes API client
+- missing.css loaded via CDN (`https://unpkg.com/missing.css@1.2.0/dist/missing.min.css`, integrity `sha256-+bBeBYUh9+UNWDnPnXnxnT56osQnODQd6JzO8wZ9ZBo=`)
+- HTMX loaded via CDN (no build step)
+- Stdlib only for config (`os.Getenv`, `strconv`), logging (`log/slog`)
+
+## Testing Strategy
+
+- Unit tests only — never test against a real cluster
+- `k8s.io/client-go` `fake.NewClientset` for all k8s package tests
+- Handler tests mock the `CronJobService` interface
+- templ view tests using `templ.ExecuteToString()` + substring assertions (catches rendering regressions)
+- Handler integration tests using `net/http/httptest` with mocked service — validates routing and serialization
+- Run with `go test ./...`
+
+## Job Running Status
+
+The dashboard must signal when a job is already running for a CronJob:
+- For each CronJob, check if any child Job has `Active > 0` or has a `Running` condition
+- Display as a status indicator in the table (e.g., badge or icon)
+- Trigger button should warn if a job is already running
+- This requires fetching child jobs during the cronjob list call (done by the background informer)
+
+## MVP Scope
+
+1. **Config** — env var loading with `Config` struct, `Load()`, `Validate()`
+2. **K8s client** — connect to cluster (in-cluster + kubeconfig fallback), list cronjobs
+3. **Cached state** — background informer-backed store, serves all reads
+4. **Basic auth** — fiber middleware, probe endpoints excluded
+5. **Dashboard view** — table: name, namespace, schedule, suspend status, running status, last successful run, last failure
+6. **Manual trigger** — confirmation modal (HTMX swap) → creates a one-off Job from the CronJob spec, with explicit concurrency check
+7. **Auto-refresh** — HTMX polling (configurable interval) reads from cache
+8. **Health probes** — `/healthz` (liveness, simple 200) and `/readyz` (readiness, checks cache freshness)
+9. **Graceful shutdown** — signal handling (`SIGTERM`/`SIGINT`) via `signal.NotifyContext`, fiber `Shutdown()` with timeout
+10. **Structured logging** — `log/slog` throughout
+
+## Trigger Safety
+
+- Confirmation modal before firing a trigger (HTMX swap)
+- **Concurrency check:** before creating a manual Job, list active (running) child Jobs of the CronJob (match on `ownerReferences`). If any are active, reject the trigger with a clear error. This is necessary because `concurrencyPolicy` on the CronJob object only controls the CronJob controller's behavior — it does **not** apply to manually created Jobs.
+- **Single replica only:** `replicaCount` must be `1`. `ownerReferences` establishes parent-child garbage collection but does **not** make job creation idempotent. Multiple replicas receiving concurrent trigger requests would create duplicate manual jobs. If you need HA, add server-side idempotency (Post-MVP).
+- **Context propagation:** `context.Context` from the Fiber request is wired through to K8s API calls. If a user disconnects mid-request, the K8s API call is cancelled via `c.Context()`.
+
+## Health & Probes
+
+- `GET /healthz` — returns 200, confirms the HTTP server is running (no auth required)
+- `GET /readyz` — returns 200 only if the cache has been synced recently (last successful sync < 2× sync interval). Uses an atomic bool set by the background informer goroutine — no K8s API call per probe.
+- Both wired as fiber routes, excluded from auth middleware
+- Helm chart configures `livenessProbe` and `readinessProbe` on these endpoints
+
+## Graceful Shutdown
+
+- Listen for `SIGTERM` and `SIGINT` via `signal.NotifyContext`
+- On signal: stop the background informers, stop accepting new connections, drain in-flight requests (fiber `Shutdown()` with timeout)
+- Close k8s client connections cleanly
+
+## Build & Dev Workflow
+
+- `just generate` — runs `go tool templ generate` to compile `.templ` files
+- `just build` — depends on `generate`, then compiles the Go binary
+- `just dev` — watch for `.templ` + `.go` changes, auto-generate and rebuild
+- `just vendor` — tidy + vendor dependencies
+- Dockerfile build stage runs `templ generate` before `go build`
+
+## Static Assets (CSS/JS)
+
+- **MVP:** HTMX and missing.css loaded from CDN
+- **Future:** vendor and embed via `go:embed`, serve from GoFiber static route — works in air-gapped clusters
+
+## Packaging & Deployment
+
+### Docker
+
+Multi-stage `Dockerfile`:
+
+- **Stage 1 (build):** Go alpine builder, `apk add just` and compile static binary
+- **Stage 2 (runtime):** `scratch` base, copy binary only
+- Built binary will be `k8s-crondash` with ldflags for version/commit/date
+- Expose port 3000 (configurable via `LISTEN_ADDR`)
+
+### Helm Chart
+
+```
+deploy/charts/k8s-crondash/
+  Chart.yaml              # version: 0.1.0, appVersion: 0.1.0 (alpha/experimental)
+  values.yaml
+  templates/
+    deployment.yaml
+    service.yaml
+    serviceaccount.yaml
+    clusterrole.yaml        # conditional: only when rbac.namespaced=false
+    clusterrolebinding.yaml # conditional: only when rbac.namespaced=false
+    role.yaml               # conditional: only when rbac.namespaced=true
+    rolebinding.yaml        # conditional: only when rbac.namespaced=true
+    configmap.yaml          # optional: override env defaults
+    secret.yaml             # AUTH_USERNAME, AUTH_PASSWORD
+    ingress.yaml            # optional
+    _helpers.tpl
+    NOTES.txt
+```
+
+**values.yaml** key settings:
+
+| Value | Default | Description |
+|---|---|---|
+| `replicaCount` | `1` | Number of pods (**must be 1** — see Trigger Safety) |
+| `image.repository` | `k8s-crondash` | Container image |
+| `image.tag` | chart appVersion | Image tag |
+| `service.port` | `80` | Service port (targets container 3000) |
+| `rbac.create` | `true` | Create RBAC resources |
+| `rbac.namespaced` | `false` | Use Role/RoleBinding instead of ClusterRole/ClusterRoleBinding |
+| `auth.username` | (required) | Basic auth username (stored in Secret) |
+| `auth.password` | (required) | Basic auth password (stored in Secret) |
+| `env.listenAddr` | `:3000` | `LISTEN_ADDR` |
+| `env.namespace` | `""` | `NAMESPACE` (empty = all) |
+| `env.refreshInterval` | `"5"` | `REFRESH_INTERVAL` |
+| `env.jobHistoryLimit` | `"5"` | `JOB_HISTORY_LIMIT` |
+| `ingress.enabled` | `false` | Enable ingress |
+| `resources` | minimal requests | Pod resource limits |
+| `livenessProbe` | HTTP GET `/healthz` | Liveness probe config |
+| `readinessProbe` | HTTP GET `/readyz` | Readiness probe config |
+
+**RBAC permissions needed:**
+- `get`, `list`, `watch` on `cronjobs` and `jobs`
+- `create` on `jobs` (for manual trigger)
+- When `rbac.namespaced=true` + `NAMESPACE` is set: `Role` + `RoleBinding` scoped to that namespace — `ClusterRole` and `ClusterRoleBinding` templates are excluded entirely
+- When `rbac.namespaced=false`: `ClusterRole` + `ClusterRoleBinding` — `Role` and `RoleBinding` templates are excluded entirely
+
+**Replica count guard** in `_helpers.tpl`:
+```yaml
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be 1 — see Trigger Safety in README" }}
+{{- end }}
+```
+
+Deployment spec uses `strategy: Recreate` to prevent rolling duplicates.
+
+## UX Error States
+
+| Scenario | UX Response |
+|---|---|
+| K8s API unreachable (sync fails) | Show last-known data with "Connection lost" banner; background goroutine retries on next sync cycle |
+| Zero CronJobs in namespace | Empty state: "No CronJobs found in namespace [all]" with guidance text |
+| Trigger fails (suspended, RBAC denied, API timeout, already running) | Toast notification with error message; trigger button re-enables |
+| CronJob is suspended | Disable trigger button, show "Suspended" badge |
+| Partial sync failure (some namespaces error) | Show last-known data, yellow warning indicator |
+| Trigger succeeds | `POST /trigger/:ns/:name` returns HTMX fragment with toast + updated row — instant feedback, no poll dependency |
+
+Note: status data comes from the cached store, which may be up to the informer's sync interval behind. The trigger POST returns an updated partial immediately so the user sees the result without waiting for the next poll.
+
+## Multi-Namespace Display
+
+When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` column. When scoped to a single namespace, the column is hidden to reduce noise. The `REFRESH_INTERVAL` is rendered as `hx-trigger="every ${REFRESH_INTERVAL}s"` in the template, wired from config — not hardcoded.
+
+## Post-MVP
+
+### Security & Compliance
+- Vendor and embed HTMX + missing.css via `go:embed` (air-gapped clusters)
+- RBAC-aware UI: grey out trigger if user can't create jobs
+
+### Observability
+- Expandable rows showing job history
+- Job logs viewer (stream via API)
+
+### UX
+- Namespace selector/filter
+- Dry-run mode for triggers
+- Server-side idempotency for triggers (enables multi-replica HA)
+
+### Packaging
+- Helm chart hardening: `helm lint`, `helm template` in CI, integration test against kind cluster
+- Chart versioning and release automation
+
+## TODO
+
+### Phase 1 — Scaffold & Config
+- [ ] `internal/config/config.go` — `Config` struct with `Load()` + `Validate()`, fails fast on missing `AUTH_USERNAME`/`AUTH_PASSWORD`
+- [ ] `main.go` — fiber server, basic auth middleware (probe endpoints excluded), health endpoints, structured logging (`slog`), graceful shutdown
+- [ ] `justfile` — add `generate` recipe
+- [ ] Checkpoint: `just run` starts server, `/healthz` returns 200, non-probe routes require auth
+
+### Phase 2 — K8s Client & Cached State
+- [ ] `internal/k8s/client.go` — client setup (in-cluster + kubeconfig fallback)
+- [ ] `internal/k8s/cronjobs.go` — `ListCronJobs` with child job status (running indicator)
+- [ ] `internal/k8s/jobs.go` — `ListJobs` (child jobs of a cronjob, matched via `ownerReferences`)
+- [ ] `internal/k8s/cronjobs.go` — `CronJobDisplay` struct
+- [ ] `internal/state/store.go` — cached state store (`sync.RWMutex`, `ListCronJobs` reads from cache)
+- [ ] `internal/state/informers.go` — client-go informer setup for CronJobs and Jobs, populates cache
+- [ ] Unit tests with `fake.NewClientset`
+- [ ] Checkpoint: can list cronjobs + running status from a real cluster
+
+### Phase 3 — Dashboard UI (Read-only)
+- [ ] `internal/views/layout.templ` — base HTML shell with missing.css + HTMX (CDN, integrity hashes)
+- [ ] `internal/views/dashboard.templ` — cronjob table (name, namespace, schedule, suspended, running, last success, last failure). Namespace column conditionally visible.
+- [ ] `internal/views/partials.templ` — table body partial for HTMX swap
+- [ ] `internal/handlers/interface.go` — `CronJobService` interface
+- [ ] `internal/handlers/dashboard.go` — `GET /` (full page), `GET /cronjobs` (HTMX partial, reads from cache)
+- [ ] Auto-refresh via HTMX polling (`hx-trigger="every ${REFRESH_INTERVAL}s"`, configurable)
+- [ ] Handler unit tests (mocked `CronJobService`)
+- [ ] templ view tests (`ExecuteToString` + assertions)
+- [ ] Checkpoint: open browser, see live cronjob table auto-refreshing
+
+### Phase 4 — Manual Trigger
+- [ ] `internal/k8s/cronjobs.go` — `TriggerCronJob` (create Job from CronJob spec, explicit concurrency check via active child Jobs)
+- [ ] `internal/views/partials.templ` — confirmation modal + toast/feedback
+- [ ] `internal/handlers/cronjob.go` — `POST /trigger/:ns/:name` returns HTMX fragment (toast + updated row) — instant feedback
+- [ ] Disable/warn trigger button when job already running
+- [ ] Wire `context.Context` from Fiber request through to K8s API calls
+- [ ] Unit tests for trigger logic + handler
+- [ ] Checkpoint: click trigger → confirm → job appears in cluster
+
+### Phase 5 — Packaging & Deployment (alpha)
+- [ ] `Dockerfile` — multi-stage build with `templ generate`
+- [ ] Helm chart `deploy/charts/k8s-crondash/` (all templates, RBAC, probes, auth Secret, replica guard) — `version: 0.1.0`, `appVersion: 0.1.0`
+- [ ] Update `README.md` with usage instructions
+- [ ] Manual smoke test: `helm install` on kind cluster → dashboard accessible → trigger works
+
+> **Note:** Helm chart is considered alpha/experimental. Hardening (automated `helm lint`/`helm template` in CI, integration tests against kind) is Post-MVP.
