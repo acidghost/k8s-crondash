@@ -77,7 +77,7 @@ func main() {
 
 	cfg.AuthPassword = ""
 
-	dashboardHandler := handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "")
+	dashboardHandler := handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "", cfg.Namespace)
 	app.Get("/", dashboardHandler.Index)
 	app.Get("/cronjobs", dashboardHandler.CronJobs)
 

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/acidghost/k8s-crondash/internal/views"
@@ -12,13 +11,15 @@ type DashboardHandler struct {
 	service         CronJobService
 	refreshInterval int
 	showNamespace   bool
+	namespace       string
 }
 
-func NewDashboardHandler(service CronJobService, refreshInterval int, showNamespace bool) *DashboardHandler {
+func NewDashboardHandler(service CronJobService, refreshInterval int, showNamespace bool, namespace string) *DashboardHandler {
 	return &DashboardHandler{
 		service:         service,
 		refreshInterval: refreshInterval,
 		showNamespace:   showNamespace,
+		namespace:       namespace,
 	}
 }
 
@@ -27,8 +28,7 @@ func (h *DashboardHandler) Index(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).SendString("failed to load cronjobs")
 	}
-	_ = jobs
-	return views.Render(c, views.Index())
+	return views.Render(c, views.Dashboard(jobs, h.showNamespace, h.refreshInterval, h.namespace))
 }
 
 func (h *DashboardHandler) CronJobs(c fiber.Ctx) error {
@@ -36,5 +36,5 @@ func (h *DashboardHandler) CronJobs(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).SendString("failed to load cronjobs")
 	}
-	return c.Type("text").SendString(fmt.Sprintf("cronjob count: %d", len(jobs)))
+	return views.Render(c, views.CronJobTableBody(jobs, h.showNamespace))
 }

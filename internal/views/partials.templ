@@ -1,0 +1,60 @@
+package views
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/acidghost/k8s-crondash/internal/k8s"
+)
+
+templ CronJobTableBody(jobs []k8s.CronJobDisplay, showNamespace bool) {
+	for _, job := range jobs {
+		<tr>
+			<td>{ job.Name }</td>
+			if showNamespace {
+				<td>{ job.Namespace }</td>
+			}
+			<td><code>{ job.Schedule }</code></td>
+			<td>
+				if job.Suspended {
+					<span class="badge" style="background:var(--warning);color:#000">Suspended</span>
+				}
+				if job.Running {
+					<span class="badge" style="background:var(--success);color:#000">Running</span>
+				}
+				if !job.Suspended && !job.Running {
+					<span class="badge" style="background:var(--muted);color:#000">Idle</span>
+				}
+			</td>
+			<td>{ formatTime(job.LastSuccess) }</td>
+			<td>{ formatTime(job.LastFailure) }</td>
+			<td>{ fmt.Sprintf("%d", job.ActiveJobs) }</td>
+		</tr>
+	}
+	if len(jobs) == 0 {
+		<tr>
+			<td colspan="7" style="text-align:center">No CronJobs found</td>
+		</tr>
+	}
+}
+
+templ EmptyState(namespace string) {
+	<div style="text-align:center;padding:2rem">
+		<p>No CronJobs found in namespace <strong>{ namespaceLabel(namespace) }</strong>.</p>
+		<p style="color:var(--muted)">CronJobs will appear here once they are created in the cluster.</p>
+	</div>
+}
+
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return "—"
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
+func namespaceLabel(namespace string) string {
+	if namespace == "" {
+		return "all"
+	}
+	return namespace
+}
