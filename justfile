@@ -39,6 +39,7 @@ vendor:
     go mod vendor
 
 fmt:
+    go tool templ fmt .
     go fmt ./...
 
 lint:
