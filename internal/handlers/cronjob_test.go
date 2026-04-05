@@ -35,7 +35,6 @@ func setupTriggerApp(svc CronJobService) *fiber.App {
 	h := NewTriggerHandler(svc)
 	app := fiber.New()
 	app.Get("/trigger-confirm/:ns/:name", h.ConfirmModal)
-	app.Get("/trigger-confirm/clear", func(c fiber.Ctx) error { return c.SendString("") })
 	app.Post("/trigger/:ns/:name", h.Trigger)
 	return app
 }

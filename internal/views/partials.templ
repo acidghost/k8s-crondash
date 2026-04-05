@@ -88,9 +88,7 @@ templ TriggerConfirmModal(job k8s.CronJobDisplay) {
 					hx-swap="innerHTML"
 				>Confirm</button>
 				<button
-					hx-get="/trigger-confirm/clear"
-					hx-target="#modal-container"
-					hx-swap="innerHTML"
+					onclick="this.closest('dialog').close();document.getElementById('modal-container').innerHTML=''"
 				>Cancel</button>
 			</div>
 		</div>

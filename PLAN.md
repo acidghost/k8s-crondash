@@ -406,7 +406,10 @@ Changes:
 - [x] `internal/views/views_test.go` — view tests: `TriggerConfirmModal` renders dialog with job name and confirm button, `Toast` renders OOB fragment with correct target and auto-dismiss script
 - [x] `main.go` — construct `TriggerHandler`, register `GET /trigger-confirm/:ns/:name` → `ConfirmModal` + `POST /trigger/:ns/:name` → `Trigger`; compile-time interface assertion still passes
 - [x] Run `just fmt` + `just lint` + `just test`
-- [ ] Checkpoint: click trigger button → modal appears → confirm → toast shows success → card updates on next poll (~5s); cancel dismisses modal; suspended card has disabled trigger button; running card shows warning on trigger button
+- [-] Checkpoint: click trigger button → modal appears → confirm → toast shows success → card updates on next poll (~5s); cancel dismisses modal; suspended card has disabled trigger button; running card shows warning on trigger button
+
+Fix bugs in current implementation of phase 4b:
+- [x] clicking "clear" to dismiss the trigger confirm modal does not work
 
 ### Phase 5 — Packaging & Deployment (alpha)
 - [ ] `Dockerfile` — multi-stage build with `templ generate`
