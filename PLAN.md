@@ -497,9 +497,70 @@ Make all interactive features work without JavaScript. HTMX enhances the experie
 - [x] JS (HTMX): auto-refresh still works (same as before)
 
 ### Phase 5 — Packaging & Deployment (alpha)
-- [ ] `Dockerfile` — multi-stage build with `templ generate`
-- [ ] Helm chart `deploy/charts/k8s-crondash/` (all templates, RBAC, probes, auth Secret, replica guard) — `version: 0.1.0`, `appVersion: 0.1.0`
-- [ ] Update `README.md` with usage instructions
-- [ ] Manual smoke test: `helm install` on kind cluster → dashboard accessible → trigger works
+
+Chart is an unstable alpha — no stability guarantees, breaking changes at any time. Rolling release: `version: 0.0.0`, `appVersion: "0.0.0"`, `image.tag: latest` in source. Semver starts when we cut a stable release.
+
+#### 5a — Dockerfile
+
+- [ ] Create `.dockerignore` — exclude `.git/`, `build/`, `.github/`, `*.md` (except none needed in build), `mise.toml`, `renovate.json`, `.golangci.yml`, `.crush.json`, `cj.yml`, `UNLICENSE`
+- [ ] Create `Dockerfile` — multi-stage build:
+  - **Stage 1 (builder):** `golang:1.26-alpine` (matching go.mod toolchain), `apk add git`, `WORKDIR /src`, `COPY go.mod go.sum ./`, `COPY vendor/ vendor/`, install templ via `go install github.com/a-h/templ/cmd/templ` (version pinned to match go.mod tools), `COPY . .`, run `templ generate`, then `CGO_ENABLED=0 go build -ldflags '-s -w -X main.buildVersion=0.0.0 -X main.buildCommit=<git-sha> -X main.buildDate=<timestamp>' -o /bin/k8s-crondash`
+  - **Stage 2 (runtime):** `scratch`, `COPY --from=builder /bin/k8s-crondash /bin/k8s-crondash`, `EXPOSE 3000`, `ENTRYPOINT ["k8s-crondash"]`
+- [ ] Add `docker-build` recipe to justfile — `docker build -t k8s-crondash:latest .` (no `just build` dependency, Dockerfile handles templ + go build internally)
+- [ ] Verify: `just docker-build` produces image, `docker run --rm -p 3000:3000 k8s-crondash:latest --help` prints usage
+
+#### 5b — Helm Chart
+
+- [ ] Create `deploy/charts/k8s-crondash/Chart.yaml` — `apiVersion: v2`, `name: k8s-crondash`, `version: 0.0.0`, `appVersion: "0.0.0"`, `description: Web dashboard for Kubernetes CronJobs`
+- [ ] Create `deploy/charts/k8s-crondash/values.yaml` with defaults:
+  - `replicaCount: 1`
+  - `image.repository: k8s-crondash`, `image.tag: latest`, `image.pullPolicy: Always`
+  - `service.port: 80`, `service.targetPort: 3000`
+  - `rbac.create: true`, `rbac.namespaced: false`
+  - `auth.username: ""` (required), `auth.password: ""` (required)
+  - `env.listenAddr: ":3000"`, `env.namespace: ""`, `env.refreshInterval: "5"`, `env.jobHistoryLimit: "5"`
+  - `ingress.enabled: false`, `ingress` scaffold (className, hosts, tls)
+  - `resources:` with minimal requests (cpu: 50m, memory: 64Mi)
+  - `livenessProbe`: HTTP GET `/healthz` on port 3000, `periodSeconds: 10`
+  - `readinessProbe`: HTTP GET `/readyz` on port 3000, `periodSeconds: 10`, `initialDelaySeconds: 5`
+- [ ] Create `deploy/charts/k8s-crondash/templates/_helpers.tpl`:
+  - `k8s-crondash.name`: chart name
+  - `k8s-crondash.labels`: standard Helm labels (helm.sh/chart, app.kubernetes.io/name, app.kubernetes.io/instance, app.kubernetes.io/version, app.kubernetes.io/managed-by)
+  - `k8s-crondash.selectorLabels`: app.kubernetes.io/name + app.kubernetes.io/instance
+  - `k8s-crondash.replicaGuard`: fail if `replicaCount > 1` with message referencing Trigger Safety
+- [ ] Create `deploy/charts/k8s-crondash/templates/deployment.yaml`:
+  - `strategy: Recreate`
+  - Single container with image, ports (3000), env vars from ConfigMap + Secret
+  - `LIVEN_ADDR` from `env.listenAddr`, `NAMESPACE` from `env.namespace`, `REFRESH_INTERVAL` from `env.refreshInterval`, `JOB_HISTORY_LIMIT` from `env.jobHistoryLimit`
+  - `AUTH_USERNAME` from secret key `username`, `AUTH_PASSWORD` from secret key `password`
+  - `livenessProbe` + `readinessProbe` wired from values
+  - Resource limits from values
+  - ServiceAccount name
+- [ ] Create `deploy/charts/k8s-crondash/templates/service.yaml` — ClusterIP, port mapping (servicePort → targetPort 3000)
+- [ ] Create `deploy/charts/k8s-crondash/templates/serviceaccount.yaml` — always created, `automountServiceAccountToken: true`
+- [ ] Create `deploy/charts/k8s-crondash/templates/secret.yaml` — `auth.username` and `auth.password` from values, `type: Opaque`
+- [ ] Create `deploy/charts/k8s-crondash/templates/configmap.yaml` — `LISTEN_ADDR`, `NAMESPACE`, `REFRESH_INTERVAL`, `JOB_HISTORY_LIMIT` from values
+- [ ] Create `deploy/charts/k8s-crondash/templates/clusterrole.yaml` + `clusterrolebinding.yaml` — conditional on `rbac.create` and `not rbac.namespaced`; permissions: `get`, `list`, `watch` on `cronjobs` and `jobs`, `create` on `jobs`
+- [ ] Create `deploy/charts/k8s-crondash/templates/role.yaml` + `rolebinding.yaml` — conditional on `rbac.create` and `rbac.namespaced`; same permissions, scoped to `NAMESPACE` (or `"default"` if empty)
+- [ ] Create `deploy/charts/k8s-crondash/templates/ingress.yaml` — conditional on `ingress.enabled`, supports `spec.ingressClassName`, host/path rules, TLS
+- [ ] Create `deploy/charts/k8s-crondash/templates/NOTES.txt` — post-install message showing how to access the dashboard (port-forward command, service URL)
+- [ ] Add `helm-lint` recipe to justfile — `helm lint deploy/charts/k8s-crondash`
+- [ ] Add `helm-template` recipe to justfile — `helm template k8s-crondash deploy/charts/k8s-crondash`
+- [ ] Verify: `just helm-lint` passes with no errors or warnings, `just helm-template` renders all templates
+
+#### 5c — README
+
+- [ ] Write `README.md`:
+  - Project description — what k8s-crondash does (one-paragraph summary)
+  - Quick start (Helm): `helm install` example with `--set auth.username=admin,auth.password=changeme`, port-forward command
+  - Docker usage: `docker run` example with required env vars (`AUTH_USERNAME`, `AUTH_PASSWORD`)
+  - Configuration table: all env vars (from PLAN.md Config section) with their Helm values equivalents, defaults, and descriptions
+  - Development section: `just build`, `just run`, `just test`, `just lint`, `just docker-build`, `just helm-lint`
+
+#### 5d — Manual Smoke Test
+
+- [ ] `just docker-build` → load image into kind cluster (`kind load docker-image k8s-crondash:latest`)
+- [ ] `helm install k8s-crondash deploy/charts/k8s-crondash --set auth.username=admin,auth.password=changeme` → verify pods start, probes pass
+- [ ] Port-forward to service → access dashboard in browser → auth works → cronjob list renders → trigger works
 
 > **Note:** Helm chart is considered alpha/experimental. Hardening (automated `helm lint`/`helm template` in CI, integration tests against kind) is Post-MVP.
