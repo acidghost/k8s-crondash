@@ -1,5 +1,6 @@
 .git/
 build/
+.crush.json
 .golangci.yml
 *.md
 UNLICENSE
