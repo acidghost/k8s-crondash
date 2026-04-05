@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/acidghost/k8s-crondash/internal/views"
 	"github.com/gofiber/fiber/v3"
@@ -32,7 +33,10 @@ func (h *TriggerHandler) ConfirmModal(c fiber.Ctx) error {
 
 	for _, job := range jobs {
 		if job.Namespace == ns && job.Name == name {
-			return views.Render(c, views.TriggerConfirmModal(job))
+			if views.IsHTMX(c) {
+				return views.Render(c, views.TriggerConfirmModal(job))
+			}
+			return views.Render(c, views.TriggerConfirmPage(job))
 		}
 	}
 
@@ -50,8 +54,15 @@ func (h *TriggerHandler) Trigger(c fiber.Ctx) error {
 	err := h.service.TriggerCronJob(c.Context(), ns, name)
 	if err != nil {
 		slog.Error("trigger failed", "namespace", ns, "name", name, "error", err)
-		return views.Render(c, views.Toast(fmt.Sprintf("Trigger failed: %s", err.Error()), false))
+		if views.IsHTMX(c) {
+			return views.Render(c, views.Toast(fmt.Sprintf("Trigger failed: %s", err.Error()), false))
+		}
+		flash := url.QueryEscape(fmt.Sprintf("Trigger failed: %s", err.Error()))
+		return c.Redirect().Status(http.StatusSeeOther).To("/?flash=" + flash + "&flash-type=bad")
 	}
 
-	return views.Render(c, views.Toast("Job triggered", true))
+	if views.IsHTMX(c) {
+		return views.Render(c, views.Toast("Job triggered", true))
+	}
+	return c.Redirect().Status(http.StatusSeeOther).To("/?flash=Job+triggered&flash-type=ok")
 }

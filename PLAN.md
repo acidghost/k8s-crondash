@@ -411,6 +411,91 @@ Changes:
 Fix bugs in current implementation of phase 4b:
 - [x] clicking "clear" to dismiss the trigger confirm modal does not work
 
+### Phase 4c — Progressive Enhancement (No-JS Fallback)
+
+Make all interactive features work without JavaScript. HTMX enhances the experience when JS is available, but the app is fully functional via standard HTML navigation.
+
+**Core principle:** Every interactive element gets a semantic HTML fallback. The server detects `HX-Request` header to decide: partial (HTMX) vs full-page (no-JS).
+
+#### Design Decisions
+
+- **Flash params vs cookies:** Flash messages are passed as `?flash=...&flash-type=ok|bad` query parameters on redirects. Simpler than cookies (no middleware, no session store). Compromise: flash text appears in URLs and server access logs. Acceptable because the app is behind basic auth and messages are operational (e.g., "Job triggered"), not sensitive.
+- **TriggerConfirmPage is a separate template** from TriggerConfirmModal. The modal uses `<dialog>` + `onclick` + HTMX attributes; the page uses `<form>` + `<a>` + no dialog. Different enough to warrant separate templates.
+- **Auto-refresh without JS:** A visible "Refresh" link/button on the dashboard, not `<meta http-equiv="refresh">`. Cleaner UX, no HTML validation concerns, gives the user explicit control.
+
+#### Implementation TODO
+
+- [x] **`internal/views/partials.templ` — Trigger buttons: `<a>` instead of `<button>`**
+   - Change trigger buttons from `<button hx-get="...">` to `<a href="/trigger-confirm/{ns}/{name}" hx-get="..." hx-target="#modal-container" hx-swap="innerHTML">`
+   - Suspended jobs: keep `<button disabled>` (already correct)
+   - Three instances: suspended (unchanged), running (becomes `<a>`), idle (becomes `<a>`)
+   - No-JS: link navigates to full confirmation page. JS: HTMX intercepts, injects modal.
+
+- [x] **`internal/views/partials.templ` — TriggerConfirmModal: `<form>` + `<a>` cancel**
+   - Wrap confirm button in `<form method="POST" action="/trigger/{ns}/{name}" hx-post="..." hx-target="#modal-container" hx-swap="innerHTML">`
+   - Cancel button → `<a href="/" onclick="event.preventDefault();this.closest('dialog').close();document.getElementById('modal-container').innerHTML=''">Cancel</a>`
+   - Keep `onclick` for JS (closes modal without navigation), `href="/"` gives no-JS a real target
+
+- [x] **`internal/views/partials.templ` — New `TriggerConfirmPage` template**
+   - Full-page confirmation wrapped in `Layout("k8s-crondash")`
+   - Same visual content as modal but as a regular page section (no `<dialog>`)
+   - Uses `<form method="POST" action="/trigger/{ns}/{name}">` with submit button
+   - Cancel is `<a href="/">Cancel</a>` — plain link home
+   - No HTMX attributes needed — it's a standard HTML page
+
+- [x] **`internal/views/dashboard.templ` — Visible refresh button**
+   - Add a refresh link/button at the top of the dashboard (e.g., `<a href="/" class="button">Refresh</a>`)
+   - Visible to all users; no-JS users use it for manual refresh
+   - HTMX users still get auto-poll; refresh button is supplementary
+
+- [x] **`internal/views/dashboard.templ` or `layout.templ` — Flash message banner**
+   - Accept `flash` and `flash-type` params in `Dashboard` template (passed from handler)
+   - Render a dismissible banner at top of `<main>`: `.chip.ok` for success, `.chip.bad` for errors
+   - Only rendered when `flash` param is non-empty
+
+- [x] **`internal/handlers/cronjob.go` — `ConfirmModal`: dual response**
+   - Check `HX-Request` header via `c.Get("HX-Request")`
+   - HTMX request: render `TriggerConfirmModal` fragment (dialog only, no layout) — same as current behavior
+   - Normal request: render `TriggerConfirmPage` (full page with layout, `<form>`, `<a>`)
+   - Both return 200
+
+- [x] **`internal/handlers/cronjob.go` — `Trigger`: dual response**
+   - Check `HX-Request` header
+   - HTMX request: render `Toast` partial (OOB swap) — same as current behavior
+   - Normal request: redirect to `/?flash=<message>&flash-type=ok|bad` with HTTP 303 (PRG pattern)
+
+- [x] **`internal/handlers/dashboard.go` — `Index`: pass flash params**
+   - Read `flash` and `flash-type` query params from request
+   - Pass them through to `Dashboard` template for banner rendering
+
+- [x] **`internal/views/render.go` — `IsHTMX` helper**
+   - Add `IsHTMX(c fiber.Ctx) bool` that returns `c.Get("HX-Request") != ""`
+   - Used by handlers to branch response format
+
+- [x] **`internal/views/views_test.go` — Update and add tests**
+   - Update `TestTriggerConfirmModal_*` tests for new `<form>` and `<a>` markup
+   - Add `TestTriggerConfirmPage_*` tests (full page, form action, cancel link)
+   - Add flash banner rendering tests
+
+- [x] **`internal/handlers/cronjob_test.go` — Update and add tests**
+   - Add `HX-Request` header to existing tests (should still return modal fragment)
+   - Add tests for no-JS flows: confirm returns full page, trigger returns 303 redirect with flash params
+
+- [x] **`internal/handlers/dashboard_test.go` — Add flash tests**
+   - Test that `GET /?flash=...&flash-type=ok` renders flash banner
+
+- [x] **Run `just generate && go test ./... && just fmt && just lint`**
+
+#### Validation checklist
+- [x] No-JS: trigger button navigates to full confirmation page
+- [x] No-JS: confirm button submits form, redirects to dashboard with flash message
+- [x] No-JS: cancel link navigates to dashboard
+- [x] No-JS: refresh button reloads dashboard
+- [x] JS (HTMX): trigger button opens modal (same as before)
+- [x] JS (HTMX): confirm fires toast, modal dismissed (same as before)
+- [x] JS (HTMX): cancel closes modal client-side (same as before)
+- [x] JS (HTMX): auto-refresh still works (same as before)
+
 ### Phase 5 — Packaging & Deployment (alpha)
 - [ ] `Dockerfile` — multi-stage build with `templ generate`
 - [ ] Helm chart `deploy/charts/k8s-crondash/` (all templates, RBAC, probes, auth Secret, replica guard) — `version: 0.1.0`, `appVersion: 0.1.0`

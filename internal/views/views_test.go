@@ -21,7 +21,7 @@ func renderToString(t *testing.T, comp templ.Component) string {
 }
 
 func TestDashboard_ContainsCardGrid(t *testing.T) {
-	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, ""))
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "", ""))
 	if !strings.Contains(html, `class="grid spacious"`) {
 		t.Error("should contain grid class")
 	}
@@ -34,7 +34,7 @@ func TestDashboard_ContainsCardGrid(t *testing.T) {
 }
 
 func TestDashboard_ContainsHTMXAttributes(t *testing.T) {
-	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 10, ""))
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 10, "", "", ""))
 	if !strings.Contains(html, `hx-get="/cronjobs"`) {
 		t.Error("should contain hx-get attribute")
 	}
@@ -46,8 +46,45 @@ func TestDashboard_ContainsHTMXAttributes(t *testing.T) {
 	}
 }
 
+func TestDashboard_ContainsRefreshButton(t *testing.T) {
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "", ""))
+	if !strings.Contains(html, `href="/"`) {
+		t.Error("should contain refresh link")
+	}
+	if !strings.Contains(html, "Refresh") {
+		t.Error("should contain Refresh text")
+	}
+}
+
+func TestDashboard_FlashBanner(t *testing.T) {
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "Job triggered", "ok"))
+	if !strings.Contains(html, "Job triggered") {
+		t.Error("should contain flash message")
+	}
+	if !strings.Contains(html, "chip ok") {
+		t.Error("success flash should have chip ok class")
+	}
+}
+
+func TestDashboard_FlashBannerError(t *testing.T) {
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "Something failed", "bad"))
+	if !strings.Contains(html, "Something failed") {
+		t.Error("should contain flash message")
+	}
+	if !strings.Contains(html, "chip bad") {
+		t.Error("error flash should have chip bad class")
+	}
+}
+
+func TestDashboard_NoFlashBanner(t *testing.T) {
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "", ""))
+	if strings.Contains(html, "chip ok") || strings.Contains(html, "chip bad") {
+		t.Error("should not render flash banner when flash is empty")
+	}
+}
+
 func TestDashboard_EmptyData_ShowsEmptyState(t *testing.T) {
-	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "default"))
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "default", "", ""))
 	if !strings.Contains(html, "No CronJobs found") {
 		t.Error("should show empty state for no jobs")
 	}
@@ -57,7 +94,7 @@ func TestDashboard_EmptyData_ShowsEmptyState(t *testing.T) {
 }
 
 func TestDashboard_EmptyData_AllNamespaces(t *testing.T) {
-	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, ""))
+	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "", ""))
 	if !strings.Contains(html, "all") {
 		t.Error("should show 'all' when namespace is empty")
 	}
@@ -125,6 +162,48 @@ func TestCronJobCards_IdleChip(t *testing.T) {
 	}
 	if !strings.Contains(html, "chip plain") {
 		t.Error("idle job should have chip plain class")
+	}
+}
+
+func TestCronJobCards_TriggerButtonIsLink(t *testing.T) {
+	jobs := []k8s.CronJobDisplay{
+		{Name: "idle-job", Namespace: "default"},
+	}
+	html := renderToString(t, CronJobCards(jobs, false))
+
+	if !strings.Contains(html, `href="/trigger-confirm/default/idle-job"`) {
+		t.Error("trigger button should be an <a> tag with href for no-JS fallback")
+	}
+	if !strings.Contains(html, `hx-get="/trigger-confirm/default/idle-job"`) {
+		t.Error("trigger link should have hx-get for HTMX")
+	}
+	if !strings.Contains(html, `class="<button>"`) {
+		t.Error("trigger link should have class=<button> for styling")
+	}
+}
+
+func TestCronJobCards_TriggerButtonSuspendedIsDisabled(t *testing.T) {
+	jobs := []k8s.CronJobDisplay{
+		{Name: "suspended-job", Namespace: "default", Suspended: true},
+	}
+	html := renderToString(t, CronJobCards(jobs, false))
+
+	if !strings.Contains(html, "<button disabled") {
+		t.Error("suspended job should have disabled button")
+	}
+}
+
+func TestCronJobCards_TriggerButtonRunningIsLink(t *testing.T) {
+	jobs := []k8s.CronJobDisplay{
+		{Name: "running-job", Namespace: "ns1", ActiveJobs: 1},
+	}
+	html := renderToString(t, CronJobCards(jobs, false))
+
+	if !strings.Contains(html, `href="/trigger-confirm/ns1/running-job"`) {
+		t.Error("running job trigger should be an <a> tag with href")
+	}
+	if !strings.Contains(html, "⚠ Trigger") {
+		t.Error("running job trigger should show warning icon")
 	}
 }
 
@@ -216,7 +295,31 @@ func TestTriggerConfirmModal_ContainsDialog(t *testing.T) {
 		t.Error("should contain confirm button")
 	}
 	if !strings.Contains(html, "Cancel") {
-		t.Error("should contain cancel button")
+		t.Error("should contain cancel link")
+	}
+}
+
+func TestTriggerConfirmModal_HasFormAndLinkCancel(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:      "test-job",
+		Namespace: "default",
+	}
+	html := renderToString(t, TriggerConfirmModal(job))
+
+	if !strings.Contains(html, `<form method="POST"`) {
+		t.Error("confirm should be wrapped in a form for no-JS fallback")
+	}
+	if !strings.Contains(html, `action="/trigger/default/test-job"`) {
+		t.Error("form should have action URL for no-JS fallback")
+	}
+	if !strings.Contains(html, `hx-post="/trigger/default/test-job"`) {
+		t.Error("form should have hx-post for HTMX")
+	}
+	if !strings.Contains(html, `<a href="/"`) {
+		t.Error("cancel should be a link with href for no-JS fallback")
+	}
+	if !strings.Contains(html, `onclick="event.preventDefault()`) {
+		t.Error("cancel link should prevent default for JS modal close")
 	}
 }
 
@@ -245,6 +348,91 @@ func TestTriggerConfirmModal_IdleJob_NoWarning(t *testing.T) {
 
 	if strings.Contains(html, "already running") {
 		t.Error("should NOT show running warning for idle job")
+	}
+}
+
+func TestTriggerConfirmPage_FullPage(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:      "backup-job",
+		Namespace: "prod",
+	}
+	html := renderToString(t, TriggerConfirmPage(job))
+
+	if !strings.Contains(html, "<!doctype html>") {
+		t.Error("should render full page with layout")
+	}
+	if !strings.Contains(html, "Trigger CronJob?") {
+		t.Error("should contain confirm heading")
+	}
+	if !strings.Contains(html, "backup-job") {
+		t.Error("should contain job name")
+	}
+	if !strings.Contains(html, `<form method="POST" action="/trigger/prod/backup-job"`) {
+		t.Error("should have form with action for no-JS submit")
+	}
+	if !strings.Contains(html, `<button type="submit">Confirm</button>`) {
+		t.Error("should have submit button")
+	}
+	if !strings.Contains(html, `<a href="/" class="<button>">Cancel</a>`) {
+		t.Error("cancel should be styled link to home")
+	}
+}
+
+func TestTriggerConfirmPage_NoDialog(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:      "test-job",
+		Namespace: "default",
+	}
+	html := renderToString(t, TriggerConfirmPage(job))
+
+	if strings.Contains(html, "<dialog") {
+		t.Error("full page should NOT use dialog element")
+	}
+	if strings.Contains(html, "hx-post") {
+		t.Error("full page should NOT use HTMX attributes")
+	}
+	if strings.Contains(html, "onclick") {
+		t.Error("full page should NOT use onclick handlers")
+	}
+}
+
+func TestTriggerConfirmPage_RunningJob_ShowsWarning(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:       "running-job",
+		Namespace:  "default",
+		ActiveJobs: 2,
+	}
+	html := renderToString(t, TriggerConfirmPage(job))
+
+	if !strings.Contains(html, "already running") {
+		t.Error("should show running warning")
+	}
+}
+
+func TestFlashBanner_Success(t *testing.T) {
+	html := renderToString(t, FlashBanner("Job triggered", "ok"))
+	if !strings.Contains(html, "Job triggered") {
+		t.Error("should contain message")
+	}
+	if !strings.Contains(html, "chip ok") {
+		t.Error("success should have chip ok class")
+	}
+}
+
+func TestFlashBanner_Error(t *testing.T) {
+	html := renderToString(t, FlashBanner("Something failed", "bad"))
+	if !strings.Contains(html, "Something failed") {
+		t.Error("should contain message")
+	}
+	if !strings.Contains(html, "chip bad") {
+		t.Error("error should have chip bad class")
+	}
+}
+
+func TestFlashBanner_Empty(t *testing.T) {
+	html := renderToString(t, FlashBanner("", ""))
+	if strings.Contains(html, "chip") {
+		t.Error("should not render anything when message is empty")
 	}
 }
 

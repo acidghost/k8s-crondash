@@ -70,6 +70,9 @@ func TestIndex_Returns200WithCards(t *testing.T) {
 	if !strings.Contains(html, "Running") {
 		t.Error("response should show Running badge")
 	}
+	if !strings.Contains(html, "Refresh") {
+		t.Error("response should contain refresh button")
+	}
 }
 
 func TestIndex_EmptyData_ShowsEmptyState(t *testing.T) {
@@ -184,5 +187,57 @@ func TestCronJobs_ServiceError_Returns500(t *testing.T) {
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestIndex_FlashSuccessBanner(t *testing.T) {
+	svc := &mockService{jobs: []k8s.CronJobDisplay{}}
+	app := setupApp(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/?flash=Job+triggered&flash-type=ok", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	if !strings.Contains(html, "Job triggered") {
+		t.Error("response should contain flash message")
+	}
+	if !strings.Contains(html, "chip ok") {
+		t.Error("success flash should have chip ok class")
+	}
+}
+
+func TestIndex_FlashErrorBanner(t *testing.T) {
+	svc := &mockService{jobs: []k8s.CronJobDisplay{}}
+	app := setupApp(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/?flash=Something+failed&flash-type=bad", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	if !strings.Contains(html, "Something failed") {
+		t.Error("response should contain flash message")
+	}
+	if !strings.Contains(html, "chip bad") {
+		t.Error("error flash should have chip bad class")
 	}
 }

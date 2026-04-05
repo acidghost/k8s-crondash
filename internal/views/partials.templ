@@ -37,18 +37,22 @@ templ cronJobCard(job k8s.CronJobDisplay, showNamespace bool) {
 			if job.Suspended {
 				<button disabled title="Cannot trigger suspended cronjob">Trigger</button>
 			} else if job.ActiveJobs > 0 {
-				<button
+				<a
+					class="<button>"
+					href={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
 					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
 					hx-target="#modal-container"
 					hx-swap="innerHTML"
 					title="A job is already running"
-				>⚠ Trigger</button>
+				>⚠ Trigger</a>
 			} else {
-				<button
+				<a
+					class="<button>"
+					href={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
 					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
 					hx-target="#modal-container"
 					hx-swap="innerHTML"
-				>Trigger</button>
+				>Trigger</a>
 			}
 		</div>
 	</div>
@@ -82,17 +86,33 @@ templ TriggerConfirmModal(job k8s.CronJobDisplay) {
 				<p class="chip warn" style="margin-block:var(--density, 1rem)">⚠ A job is already running for this CronJob.</p>
 			}
 			<div class="flex-row" style="gap:var(--density, 1rem);margin-block-start:var(--density, 1rem)">
-				<button
-					hx-post={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) }
-					hx-target="#modal-container"
-					hx-swap="innerHTML"
-				>Confirm</button>
-				<button
-					onclick="this.closest('dialog').close();document.getElementById('modal-container').innerHTML=''"
-				>Cancel</button>
+				<form method="POST" action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } hx-post={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } hx-target="#modal-container" hx-swap="innerHTML" style="display:inline">
+					<button type="submit">Confirm</button>
+				</form>
+				<a href="/" class="<button>" onclick="event.preventDefault();this.closest('dialog').close();document.getElementById('modal-container').innerHTML=''">Cancel</a>
 			</div>
 		</div>
 	</dialog>
+}
+
+templ TriggerConfirmPage(job k8s.CronJobDisplay) {
+	@Layout("k8s-crondash") {
+		<div class="container" style="max-width:40rem;margin-block-start:2rem">
+			<div class="box">
+				<h2>Trigger CronJob?</h2>
+				<p><strong>{ job.Name }</strong> <span class="secondary-font">in <span class="mono-font">{ job.Namespace }</span></span></p>
+				if job.ActiveJobs > 0 {
+					<p class="chip warn" style="margin-block:var(--density, 1rem)">⚠ A job is already running for this CronJob.</p>
+				}
+				<div class="flex-row" style="gap:var(--density, 1rem);margin-block-start:var(--density, 1rem)">
+					<form method="POST" action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } style="display:inline">
+						<button type="submit">Confirm</button>
+					</form>
+					<a href="/" class="<button>">Cancel</a>
+				</div>
+			</div>
+		</div>
+	}
 }
 
 templ Toast(message string, ok bool) {
@@ -108,6 +128,16 @@ templ Toast(message string, ok bool) {
 		</div>
 		<script>setTimeout(function(){document.getElementById('toast-container').innerHTML=''},4000)</script>
 		<div id="modal-container"></div>
+	}
+}
+
+templ FlashBanner(message string, flashType string) {
+	if message != "" {
+		if flashType == "ok" {
+			<div class="chip ok" style="margin-block-end:var(--density, 1rem)">{ message }</div>
+		} else {
+			<div class="chip bad" style="margin-block-end:var(--density, 1rem)">{ message }</div>
+		}
 	}
 }
 

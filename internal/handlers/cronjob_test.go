@@ -39,7 +39,7 @@ func setupTriggerApp(svc CronJobService) *fiber.App {
 	return app
 }
 
-func TestConfirmModal_ReturnsDialogHTML(t *testing.T) {
+func TestConfirmModal_HTMX_ReturnsDialogHTML(t *testing.T) {
 	svc := &triggerMockService{
 		jobs: []k8s.CronJobDisplay{
 			{Name: "my-cron", Namespace: "default", Schedule: "*/5 * * * *"},
@@ -48,6 +48,7 @@ func TestConfirmModal_ReturnsDialogHTML(t *testing.T) {
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodGet, "/trigger-confirm/default/my-cron", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -75,6 +76,45 @@ func TestConfirmModal_ReturnsDialogHTML(t *testing.T) {
 	}
 }
 
+func TestConfirmModal_NoJS_ReturnsFullPage(t *testing.T) {
+	svc := &triggerMockService{
+		jobs: []k8s.CronJobDisplay{
+			{Name: "my-cron", Namespace: "default", Schedule: "*/5 * * * *"},
+		},
+	}
+	app := setupTriggerApp(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/trigger-confirm/default/my-cron", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	if !strings.Contains(html, "<!doctype html>") {
+		t.Error("should render full page with layout")
+	}
+	if !strings.Contains(html, "my-cron") {
+		t.Error("should contain cronjob name")
+	}
+	if !strings.Contains(html, `<form method="POST" action="/trigger/default/my-cron"`) {
+		t.Error("should have form with action for no-JS submit")
+	}
+	if strings.Contains(html, "<dialog") {
+		t.Error("full page should NOT use dialog element")
+	}
+	if !strings.Contains(html, `<a href="/" class="<button>">Cancel</a>`) {
+		t.Error("cancel should be styled link to home")
+	}
+}
+
 func TestConfirmModal_RunningJob_ShowsWarning(t *testing.T) {
 	svc := &triggerMockService{
 		jobs: []k8s.CronJobDisplay{
@@ -84,6 +124,7 @@ func TestConfirmModal_RunningJob_ShowsWarning(t *testing.T) {
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodGet, "/trigger-confirm/ns1/running-cron", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -116,13 +157,14 @@ func TestConfirmModal_NotFound_Returns404(t *testing.T) {
 	}
 }
 
-func TestTrigger_Success_ReturnsToast(t *testing.T) {
+func TestTrigger_HTMX_Success_ReturnsToast(t *testing.T) {
 	svc := &triggerMockService{
 		triggerErr: nil,
 	}
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/trigger/default/my-cron", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -153,13 +195,66 @@ func TestTrigger_Success_ReturnsToast(t *testing.T) {
 	}
 }
 
-func TestTrigger_AlreadyRunning_ReturnsErrorToast(t *testing.T) {
+func TestTrigger_NoJS_Success_RedirectsWithFlash(t *testing.T) {
+	svc := &triggerMockService{
+		triggerErr: nil,
+	}
+	app := setupTriggerApp(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/trigger/default/my-cron", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+
+	location := resp.Header.Get("Location")
+	if !strings.Contains(location, "flash=Job+triggered") {
+		t.Errorf("redirect should contain flash param, got: %s", location)
+	}
+	if !strings.Contains(location, "flash-type=ok") {
+		t.Errorf("redirect should contain flash-type=ok, got: %s", location)
+	}
+}
+
+func TestTrigger_NoJS_Error_RedirectsWithErrorFlash(t *testing.T) {
+	svc := &triggerMockService{
+		triggerErr: fmt.Errorf("cronjob is suspended"),
+	}
+	app := setupTriggerApp(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/trigger/default/my-cron", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+
+	location := resp.Header.Get("Location")
+	if !strings.Contains(location, "flash=") {
+		t.Errorf("redirect should contain flash param, got: %s", location)
+	}
+	if !strings.Contains(location, "flash-type=bad") {
+		t.Errorf("redirect should contain flash-type=bad, got: %s", location)
+	}
+}
+
+func TestTrigger_HTMX_AlreadyRunning_ReturnsErrorToast(t *testing.T) {
 	svc := &triggerMockService{
 		triggerErr: fmt.Errorf("cronjob default/my-cron already has a running job: my-cron-123"),
 	}
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/trigger/default/my-cron", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -180,13 +275,14 @@ func TestTrigger_AlreadyRunning_ReturnsErrorToast(t *testing.T) {
 	}
 }
 
-func TestTrigger_Suspended_ReturnsErrorToast(t *testing.T) {
+func TestTrigger_HTMX_Suspended_ReturnsErrorToast(t *testing.T) {
 	svc := &triggerMockService{
 		triggerErr: fmt.Errorf("cronjob default/suspended-cj is suspended"),
 	}
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/trigger/default/suspended-cj", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -204,13 +300,14 @@ func TestTrigger_Suspended_ReturnsErrorToast(t *testing.T) {
 	}
 }
 
-func TestTrigger_ServiceError_ReturnsErrorToast(t *testing.T) {
+func TestTrigger_HTMX_ServiceError_ReturnsErrorToast(t *testing.T) {
 	svc := &triggerMockService{
 		triggerErr: errors.New("k8s api timeout"),
 	}
 	app := setupTriggerApp(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/trigger/default/my-cron", nil)
+	req.Header.Set("HX-Request", "true")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

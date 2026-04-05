@@ -28,7 +28,9 @@ func (h *DashboardHandler) Index(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(http.StatusInternalServerError).SendString("failed to load cronjobs")
 	}
-	return views.Render(c, views.Dashboard(jobs, h.showNamespace, h.refreshInterval, h.namespace))
+	flash := c.Query("flash")
+	flashType := c.Query("flash-type")
+	return views.Render(c, views.Dashboard(jobs, h.showNamespace, h.refreshInterval, h.namespace, flash, flashType))
 }
 
 func (h *DashboardHandler) CronJobs(c fiber.Ctx) error {

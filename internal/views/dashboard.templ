@@ -6,9 +6,13 @@ import (
 	"github.com/acidghost/k8s-crondash/internal/k8s"
 )
 
-templ Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int, namespace string) {
+templ Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int, namespace string, flash string, flashType string) {
 	@Layout("k8s-crondash") {
 		<div class="container">
+			@FlashBanner(flash, flashType)
+			<div style="margin-block-end:var(--density, 1rem)">
+				<a href="/" class="<button>">Refresh</a>
+			</div>
 			<div
 				id="cronjob-cards"
 				class="grid spacious"
