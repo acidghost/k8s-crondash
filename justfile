@@ -34,6 +34,12 @@ build-dir:
 run *args: build
     ./build/{{program}}-{{goos}}-{{goarch}} {{args}}
 
+docker-build:
+    docker build \
+        --build-arg "BUILD_VERSION={{version}}" \
+        --build-arg "BUILD_COMMIT={{commit_sha}}" \
+        -t k8s-crondash:latest .
+
 vendor:
     go mod tidy
     go mod vendor

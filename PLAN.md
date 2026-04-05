@@ -502,12 +502,12 @@ Chart is an unstable alpha — no stability guarantees, breaking changes at any 
 
 #### 5a — Dockerfile
 
-- [ ] Create `.dockerignore` — exclude `.git/`, `build/`, `.github/`, `*.md` (except none needed in build), `mise.toml`, `renovate.json`, `.golangci.yml`, `.crush.json`, `cj.yml`, `UNLICENSE`
-- [ ] Create `Dockerfile` — multi-stage build:
-  - **Stage 1 (builder):** `golang:1.26-alpine` (matching go.mod toolchain), `apk add git`, `WORKDIR /src`, `COPY go.mod go.sum ./`, `COPY vendor/ vendor/`, install templ via `go install github.com/a-h/templ/cmd/templ` (version pinned to match go.mod tools), `COPY . .`, run `templ generate`, then `CGO_ENABLED=0 go build -ldflags '-s -w -X main.buildVersion=0.0.0 -X main.buildCommit=<git-sha> -X main.buildDate=<timestamp>' -o /bin/k8s-crondash`
+- [x] Create `.dockerignore` — exclude `.git/`, `build/`, `.github/`, `*.md` (except none needed in build), `mise.toml`, `renovate.json`, `.golangci.yml`, `.crush.json`, `cj.yml`, `UNLICENSE`
+- [x] Create `Dockerfile` — multi-stage build:
+  - **Stage 1 (builder):** `golang:1.26-alpine` (matching go.mod toolchain), `apk add git just`, `WORKDIR /src`, `COPY go.mod go.sum ./`, `COPY vendor/ vendor/`, `COPY . .`, `ARG BUILD_VERSION=0.0.0` + `ARG BUILD_COMMIT=unknown`, run `just version="${BUILD_VERSION}" commit_sha="${BUILD_COMMIT}" build` (just overrides version/commit from host, build_date computed inside container to preserve Docker cache), `mv build/k8s-crondash-linux-* /bin/k8s-crondash`
   - **Stage 2 (runtime):** `scratch`, `COPY --from=builder /bin/k8s-crondash /bin/k8s-crondash`, `EXPOSE 3000`, `ENTRYPOINT ["k8s-crondash"]`
-- [ ] Add `docker-build` recipe to justfile — `docker build -t k8s-crondash:latest .` (no `just build` dependency, Dockerfile handles templ + go build internally)
-- [ ] Verify: `just docker-build` produces image, `docker run --rm -p 3000:3000 k8s-crondash:latest --help` prints usage
+- [x] Add `docker-build` recipe to justfile — `docker build -t k8s-crondash:latest .` (no `just build` dependency, Dockerfile handles templ + go build internally)
+- [x] Verify: `just docker-build` produces image, `docker run --rm -p 3000:3000 k8s-crondash:latest --help` prints usage
 
 #### 5b — Helm Chart
 
