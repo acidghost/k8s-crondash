@@ -134,8 +134,11 @@ func TestCronJobCards_NamespaceHidden(t *testing.T) {
 	}
 	html := renderToString(t, CronJobCards(jobs, false))
 
-	if strings.Contains(html, "secret-ns") {
-		t.Error("should NOT contain namespace when showNamespace=false")
+	if strings.Contains(html, "secondary-font\"><span class=\"mono-font\">secret-ns") {
+		t.Error("should NOT render namespace display line when showNamespace=false")
+	}
+	if !strings.Contains(html, "/trigger-confirm/secret-ns/job-a") {
+		t.Error("trigger button URL should still contain namespace")
 	}
 }
 
@@ -183,5 +186,104 @@ func TestEmptyState_AllNamespaces(t *testing.T) {
 	html := renderToString(t, EmptyState(""))
 	if !strings.Contains(html, "all") {
 		t.Error("should show 'all' when namespace is empty")
+	}
+}
+
+func TestTriggerConfirmModal_ContainsDialog(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:      "backup-job",
+		Namespace: "prod",
+		Schedule:  "0 2 * * *",
+	}
+	html := renderToString(t, TriggerConfirmModal(job))
+
+	if !strings.Contains(html, "<dialog") {
+		t.Error("should contain dialog element")
+	}
+	if !strings.Contains(html, "backup-job") {
+		t.Error("should contain job name")
+	}
+	if !strings.Contains(html, "prod") {
+		t.Error("should contain namespace")
+	}
+	if !strings.Contains(html, "Trigger CronJob?") {
+		t.Error("should contain confirm heading")
+	}
+	if !strings.Contains(html, "/trigger/prod/backup-job") {
+		t.Error("should contain trigger POST URL")
+	}
+	if !strings.Contains(html, "Confirm") {
+		t.Error("should contain confirm button")
+	}
+	if !strings.Contains(html, "Cancel") {
+		t.Error("should contain cancel button")
+	}
+}
+
+func TestTriggerConfirmModal_RunningJob_ShowsWarning(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:       "running-job",
+		Namespace:  "default",
+		ActiveJobs: 1,
+	}
+	html := renderToString(t, TriggerConfirmModal(job))
+
+	if !strings.Contains(html, "already running") {
+		t.Error("should show running warning")
+	}
+	if !strings.Contains(html, "chip warn") {
+		t.Error("warning should have chip warn class")
+	}
+}
+
+func TestTriggerConfirmModal_IdleJob_NoWarning(t *testing.T) {
+	job := k8s.CronJobDisplay{
+		Name:      "idle-job",
+		Namespace: "default",
+	}
+	html := renderToString(t, TriggerConfirmModal(job))
+
+	if strings.Contains(html, "already running") {
+		t.Error("should NOT show running warning for idle job")
+	}
+}
+
+func TestToast_Success(t *testing.T) {
+	html := renderToString(t, Toast("Job triggered", true))
+
+	if !strings.Contains(html, "Job triggered") {
+		t.Error("should contain message")
+	}
+	if !strings.Contains(html, "chip ok") {
+		t.Error("success toast should have chip ok class")
+	}
+	if !strings.Contains(html, "toast-container") {
+		t.Error("should target toast container")
+	}
+	if !strings.Contains(html, "hx-swap-oob") {
+		t.Error("should have OOB swap attribute")
+	}
+	if !strings.Contains(html, "setTimeout") {
+		t.Error("should contain auto-dismiss script")
+	}
+	if !strings.Contains(html, `id="modal-container"`) {
+		t.Error("should clear modal container")
+	}
+}
+
+func TestToast_Error(t *testing.T) {
+	html := renderToString(t, Toast("Trigger failed: error", false))
+
+	if !strings.Contains(html, "Trigger failed: error") {
+		t.Error("should contain error message")
+	}
+	if !strings.Contains(html, "chip bad") {
+		t.Error("error toast should have chip bad class")
+	}
+	if !strings.Contains(html, "hx-swap-oob") {
+		t.Error("should have OOB swap attribute")
+	}
+	if !strings.Contains(html, "setTimeout") {
+		t.Error("should contain auto-dismiss script")
 	}
 }

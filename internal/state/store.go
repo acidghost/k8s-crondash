@@ -43,6 +43,10 @@ func (s *Store) ListCronJobs(_ context.Context) ([]k8s.CronJobDisplay, error) {
 	return out, nil
 }
 
+func (s *Store) TriggerCronJob(ctx context.Context, ns, name string) error {
+	return k8s.TriggerCronJob(ctx, s.clientset, ns, name)
+}
+
 func (s *Store) IsReady() bool {
 	return s.ready.Load()
 }

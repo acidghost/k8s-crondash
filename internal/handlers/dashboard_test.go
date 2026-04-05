@@ -23,6 +23,10 @@ func (m *mockService) ListCronJobs(_ context.Context) ([]k8s.CronJobDisplay, err
 	return m.jobs, m.err
 }
 
+func (m *mockService) TriggerCronJob(_ context.Context, _, _ string) error {
+	return m.err
+}
+
 func setupApp(svc CronJobService) *fiber.App {
 	h := NewDashboardHandler(svc, 5, true, "default")
 	app := fiber.New()

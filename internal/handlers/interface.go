@@ -8,4 +8,5 @@ import (
 
 type CronJobService interface {
 	ListCronJobs(ctx context.Context) ([]k8s.CronJobDisplay, error)
+	TriggerCronJob(ctx context.Context, ns, name string) error
 }

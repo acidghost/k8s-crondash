@@ -33,6 +33,24 @@ templ cronJobCard(job k8s.CronJobDisplay, showNamespace bool) {
 			<span class="secondary-font">✓ { formatTime(job.LastSuccess) }</span>
 			<span class="secondary-font">✗ { formatTime(job.LastFailure) }</span>
 		</div>
+		<div style="margin-block-start:var(--density, 1rem)">
+			if job.Suspended {
+				<button disabled title="Cannot trigger suspended cronjob">Trigger</button>
+			} else if job.ActiveJobs > 0 {
+				<button
+					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
+					hx-target="#modal-container"
+					hx-swap="innerHTML"
+					title="A job is already running"
+				>⚠ Trigger</button>
+			} else {
+				<button
+					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
+					hx-target="#modal-container"
+					hx-swap="innerHTML"
+				>Trigger</button>
+			}
+		</div>
 	</div>
 }
 
@@ -53,6 +71,46 @@ templ EmptyState(namespace string) {
 		<p>No CronJobs found in namespace <strong>{ namespaceLabel(namespace) }</strong>.</p>
 		<p style="color:var(--muted-fg)">CronJobs will appear here once they are created in the cluster.</p>
 	</div>
+}
+
+templ TriggerConfirmModal(job k8s.CronJobDisplay) {
+	<dialog open style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:50">
+		<div class="box">
+			<h2>Trigger CronJob?</h2>
+			<p><strong>{ job.Name }</strong> <span class="secondary-font">in <span class="mono-font">{ job.Namespace }</span></span></p>
+			if job.ActiveJobs > 0 {
+				<p class="chip warn" style="margin-block:var(--density, 1rem)">⚠ A job is already running for this CronJob.</p>
+			}
+			<div class="flex-row" style="gap:var(--density, 1rem);margin-block-start:var(--density, 1rem)">
+				<button
+					hx-post={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) }
+					hx-target="#modal-container"
+					hx-swap="innerHTML"
+				>Confirm</button>
+				<button
+					hx-get="/trigger-confirm/clear"
+					hx-target="#modal-container"
+					hx-swap="innerHTML"
+				>Cancel</button>
+			</div>
+		</div>
+	</dialog>
+}
+
+templ Toast(message string, ok bool) {
+	if ok {
+		<div hx-swap-oob="true" hx-target="#toast-container" id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100">
+			<span class="chip ok">{ message }</span>
+		</div>
+		<script>setTimeout(function(){document.getElementById('toast-container').innerHTML=''},4000)</script>
+		<div id="modal-container"></div>
+	} else {
+		<div hx-swap-oob="true" hx-target="#toast-container" id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100">
+			<span class="chip bad">{ message }</span>
+		</div>
+		<script>setTimeout(function(){document.getElementById('toast-container').innerHTML=''},4000)</script>
+		<div id="modal-container"></div>
+	}
 }
 
 func formatTime(t *time.Time) string {

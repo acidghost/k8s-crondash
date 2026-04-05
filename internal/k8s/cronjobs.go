@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -78,4 +79,52 @@ func processJobs(jobs []batchv1.Job, display *CronJobDisplay) {
 			}
 		}
 	}
+}
+
+func TriggerCronJob(ctx context.Context, clientset kubernetes.Interface, ns, name string) error {
+	cj, err := clientset.BatchV1().CronJobs(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get cronjob %s/%s: %w", ns, name, err)
+	}
+
+	if cj.Spec.Suspend != nil && *cj.Spec.Suspend {
+		return fmt.Errorf("cronjob %s/%s is suspended", ns, name)
+	}
+
+	childJobs, err := listChildJobs(ctx, clientset, ns, name, 0)
+	if err != nil {
+		return fmt.Errorf("check active jobs for %s/%s: %w", ns, name, err)
+	}
+	for _, job := range childJobs {
+		if isJobRunning(&job) {
+			return fmt.Errorf("cronjob %s/%s already has a running job: %s", ns, name, job.Name)
+		}
+	}
+
+	jobName := fmt.Sprintf("%s-manual-%d", name, time.Now().Unix())
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: ns,
+			Labels: map[string]string{
+				"batch.kubernetes.io/cronjob": name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(cj, schema.GroupVersionKind{
+					Group:   "batch",
+					Version: "v1",
+					Kind:    "CronJob",
+				}),
+			},
+		},
+		Spec: cj.Spec.JobTemplate.Spec,
+	}
+
+	_, err = clientset.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("create job for cronjob %s/%s: %w", ns, name, err)
+	}
+
+	slog.Info("triggered cronjob", "namespace", ns, "name", name, "job", jobName)
+	return nil
 }

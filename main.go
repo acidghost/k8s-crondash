@@ -81,6 +81,10 @@ func main() {
 	app.Get("/", dashboardHandler.Index)
 	app.Get("/cronjobs", dashboardHandler.CronJobs)
 
+	triggerHandler := handlers.NewTriggerHandler(store)
+	app.Get("/trigger-confirm/:ns/:name", triggerHandler.ConfirmModal)
+	app.Post("/trigger/:ns/:name", triggerHandler.Trigger)
+
 	slog.Info("listening", "addr", cfg.ListenAddr)
 
 	if err := app.Listen(cfg.ListenAddr, fiber.ListenConfig{

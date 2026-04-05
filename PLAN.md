@@ -298,6 +298,8 @@ When `NAMESPACE` is empty (watch all), the table includes a visible `namespace` 
 - Namespace selector/filter
 - Dry-run mode for triggers
 - Server-side idempotency for triggers (enables multi-replica HA)
+- Post-trigger card update: force cache sync (`store.sync()`) after successful trigger and return updated card HTML, so the user sees the new active job immediately without waiting for the next poll cycle
+- Add `GetCronJob(ctx, ns, name)` to `CronJobService` interface + store for single-CronJob lookups (avoids filtering full cache for the confirmation modal)
 
 ### Packaging
 - Helm chart hardening: `helm lint`, `helm template` in CI, integration test against kind cluster
@@ -382,14 +384,29 @@ Changes:
 - [x] Run `just fmt` + `just lint` + `just test`
 - [x] Checkpoint: open browser, see responsive card grid with status dots, chips; resize to mobile → single column; verify dark mode via OS toggle
 
-### Phase 4 — Manual Trigger
-- [ ] `internal/k8s/cronjobs.go` — `TriggerCronJob` (create Job from CronJob spec, explicit concurrency check via active child Jobs)
-- [ ] `internal/views/partials.templ` — confirmation modal + toast/feedback
-- [ ] `internal/handlers/cronjob.go` — `POST /trigger/:ns/:name` returns HTMX fragment (toast + updated row) — instant feedback
-- [ ] Disable/warn trigger button when job already running
-- [ ] Wire `context.Context` from Fiber request through to K8s API calls
-- [ ] Unit tests for trigger logic + handler
-- [ ] Checkpoint: click trigger → confirm → job appears in cluster
+### Phase 4a — Trigger Backend & Interface
+
+- [x] `internal/k8s/cronjobs.go` — add `TriggerCronJob(ctx context.Context, clientset kubernetes.Interface, ns, name string) error`: fetch CronJob (return descriptive error if not found), reject if suspended, list active child jobs via `listChildJobs` (concurrency check — reject if any running), create Job from CronJob `.spec.jobTemplate` with `ownerReferences` + `batch.kubernetes.io/cronjob` label
+- [x] `internal/k8s/cronjobs_test.go` — trigger tests: success (verifies Job created with correct spec, labels, ownerReferences), already running (rejected with error), suspended (rejected with error), not found (error)
+- [x] `internal/handlers/interface.go` — add `TriggerCronJob(ctx context.Context, ns, name string) error` to `CronJobService`
+- [x] `internal/state/store.go` — add `TriggerCronJob(ctx context.Context, ns, name string) error` that delegates to `k8s.TriggerCronJob` (pass-through to K8s API, no cache interaction for writes)
+- [x] Run `just fmt` + `just lint` + `just test`
+- [x] Checkpoint: `TriggerCronJob` creates a real Job in a real cluster, concurrency/suspend guards work
+
+### Phase 4b — Trigger UI & Handler
+
+- [x] `internal/views/layout.templ` — add `<div id="modal-container"></div>` (after `<main>`) and `<div id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100"></div>` (before `</body>`) as OOB injection targets
+- [x] `internal/views/partials.templ` — add `TriggerConfirmModal(job k8s.CronJobDisplay)`: `<dialog open>` with job name, namespace, current status context, confirm button (`hx-post="/trigger/{ns}/{name}"` targeting `#modal-container`, `hx-swap="innerHTML"`), cancel button (sends request targeting `#modal-container` to clear it)
+- [x] `internal/views/partials.templ` — add `Toast(message string, ok bool)`: OOB fragment (`hx-swap-oob="true"` targeting `#toast-container`), styled with `.chip.ok` or `.chip.bad`, auto-dismiss via inline `<script>setTimeout(()=>{document.getElementById('toast-container').innerHTML=''},4000)</script>`
+- [x] `internal/views/partials.templ` — update `cronJobCard`: add trigger button (`<button hx-get="/trigger-confirm/{ns}/{name}" hx-target="#modal-container" hx-swap="innerHTML">`), disabled via `disabled` attribute if suspended, visual warning if running (`ActiveJobs > 0`)
+- [x] `internal/handlers/cronjob.go` — `TriggerHandler` struct with `CronJobService` + `showNamespace bool`:
+  - `ConfirmModal(c fiber.Ctx) error`: parse `:ns` `:name`, fetch data from store by filtering `ListCronJobs` result by ns/name, render `TriggerConfirmModal` partial
+  - `Trigger(c fiber.Ctx) error`: parse `:ns` `:name`, call `service.TriggerCronJob`, on success return `Toast("Job triggered", true)` (clears modal), on error return `Toast(errMsg, false)` (clears modal)
+- [x] `internal/handlers/cronjob_test.go` — trigger handler tests with mock service: confirm modal returns `<dialog>` HTML, success returns toast OOB fragment, already-running returns error toast, suspended returns error toast, service error returns 500 + error toast
+- [x] `internal/views/views_test.go` — view tests: `TriggerConfirmModal` renders dialog with job name and confirm button, `Toast` renders OOB fragment with correct target and auto-dismiss script
+- [x] `main.go` — construct `TriggerHandler`, register `GET /trigger-confirm/:ns/:name` → `ConfirmModal` + `POST /trigger/:ns/:name` → `Trigger`; compile-time interface assertion still passes
+- [x] Run `just fmt` + `just lint` + `just test`
+- [ ] Checkpoint: click trigger button → modal appears → confirm → toast shows success → card updates on next poll (~5s); cancel dismisses modal; suspended card has disabled trigger button; running card shows warning on trigger button
 
 ### Phase 5 — Packaging & Deployment (alpha)
 - [ ] `Dockerfile` — multi-stage build with `templ generate`

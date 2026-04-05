@@ -34,6 +34,8 @@ templ Layout(title string) {
 			<main>
 				{ children... }
 			</main>
+			<div id="modal-container"></div>
+			<div id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100"></div>
 		</body>
 	</html>
 }
