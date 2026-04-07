@@ -1,0 +1,14 @@
+k8s-crondash has been installed!
+
+Get the dashboard URL by running:
+
+  export POD_NAME=$(kubectl get pods -l "app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl port-forward "$POD_NAME" 3000:3000
+
+Then open http://localhost:3000 in your browser.
+
+Alternatively, use the service:
+
+  kubectl port-forward svc/{{ include "k8s-crondash.name" . }} {{ .Values.service.port }}:{{ .Values.service.targetPort }}
+
+Then open http://localhost:{{ .Values.service.port }} in your browser.

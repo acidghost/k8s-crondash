@@ -1,0 +1,16 @@
+{{- if and .Values.rbac.create (ne .Values.env.namespace "") }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "k8s-crondash.name" . }}
+  namespace: {{ include "k8s-crondash.resolveNamespace" . }}
+  labels:
+    {{- include "k8s-crondash.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create"]
+{{- end }}

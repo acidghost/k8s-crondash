@@ -1,0 +1,68 @@
+replicaCount: 1
+
+image:
+  repository: k8s-crondash
+  tag: latest
+  pullPolicy: Always
+
+service:
+  port: 80
+  targetPort: 3000
+
+rbac:
+  create: true
+
+auth:
+  username: ""
+  password: ""
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+env:
+  listenAddr: ":3000"
+  namespace: "-"
+  refreshInterval: "5"
+  jobHistoryLimit: "5"
+
+ingress:
+  enabled: false
+  className: ""
+  hosts: []
+  #   - host: k8s-crondash.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  tls: []
+  #   - secretName: k8s-crondash-tls
+  #     hosts:
+  #       - k8s-crondash.example.com
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 3000
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 3000
+  periodSeconds: 10
+  initialDelaySeconds: 5

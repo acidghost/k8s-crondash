@@ -1,0 +1,5 @@
+apiVersion: v2
+name: k8s-crondash
+version: 0.0.0
+appVersion: "0.0.0"
+description: Web dashboard for Kubernetes CronJobs

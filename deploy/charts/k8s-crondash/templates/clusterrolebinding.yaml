@@ -1,0 +1,16 @@
+{{- if and .Values.rbac.create (eq .Values.env.namespace "") }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "k8s-crondash.name" . }}
+  labels:
+    {{- include "k8s-crondash.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "k8s-crondash.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "k8s-crondash.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

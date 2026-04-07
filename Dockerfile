@@ -10,6 +10,7 @@ RUN just version="${BUILD_VERSION}" commit_sha="${BUILD_COMMIT}" build \
     && mv build/k8s-crondash-linux-* /bin/k8s-crondash
 
 FROM scratch
+USER 65534:65534
 COPY --from=builder /bin/k8s-crondash /bin/k8s-crondash
 EXPOSE 3000
 ENTRYPOINT ["k8s-crondash"]

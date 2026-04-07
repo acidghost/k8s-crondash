@@ -11,6 +11,8 @@ ldflags := '-s -w -X main.buildVersion='+version \
 goos := if os() == 'macos' { 'darwin' } else { os() }
 goarch := if arch() == 'aarch64' { 'arm64' } else if arch() == 'x86_64' { 'amd64' } else { arch() }
 
+helm_flags := '--set auth.username=user,auth.password=changeme'
+
 alias b := build
 alias r := run
 
@@ -39,6 +41,13 @@ docker-build:
         --build-arg "BUILD_VERSION={{version}}" \
         --build-arg "BUILD_COMMIT={{commit_sha}}" \
         -t k8s-crondash:latest .
+
+helm-lint:
+    helm lint {{helm_flags}} deploy/charts/{{program}}
+
+helm-conform:
+    helm template {{helm_flags}} {{program}} deploy/charts/{{program}} \
+        | kubeconform -summary
 
 vendor:
     go mod tidy

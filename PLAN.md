@@ -205,7 +205,7 @@ The dashboard must signal when a job is already running for a CronJob:
 Multi-stage `Dockerfile`:
 
 - **Stage 1 (build):** Go alpine builder, `apk add just` and compile static binary
-- **Stage 2 (runtime):** `scratch` base, copy binary only
+- **Stage 2 (runtime):** `scratch` base, `USER 65534`, copy binary only
 - Built binary will be `k8s-crondash` with ldflags for version/commit/date
 - Expose port 3000 (configurable via `LISTEN_ADDR`)
 
@@ -213,16 +213,16 @@ Multi-stage `Dockerfile`:
 
 ```
 deploy/charts/k8s-crondash/
-  Chart.yaml              # version: 0.1.0, appVersion: 0.1.0 (alpha/experimental)
+  Chart.yaml              # version: 0.0.0, appVersion: 0.0.0 (alpha/experimental)
   values.yaml
   templates/
     deployment.yaml
     service.yaml
     serviceaccount.yaml
-    clusterrole.yaml        # conditional: only when rbac.namespaced=false
-    clusterrolebinding.yaml # conditional: only when rbac.namespaced=false
-    role.yaml               # conditional: only when rbac.namespaced=true
-    rolebinding.yaml        # conditional: only when rbac.namespaced=true
+    clusterrole.yaml        # conditional: only when env.namespace is empty (watch all)
+    clusterrolebinding.yaml # conditional: only when env.namespace is empty (watch all)
+    role.yaml               # conditional: only when env.namespace is set
+    rolebinding.yaml        # conditional: only when env.namespace is set
     configmap.yaml          # optional: override env defaults
     secret.yaml             # AUTH_USERNAME, AUTH_PASSWORD
     ingress.yaml            # optional
@@ -239,11 +239,10 @@ deploy/charts/k8s-crondash/
 | `image.tag` | chart appVersion | Image tag |
 | `service.port` | `80` | Service port (targets container 3000) |
 | `rbac.create` | `true` | Create RBAC resources |
-| `rbac.namespaced` | `false` | Use Role/RoleBinding instead of ClusterRole/ClusterRoleBinding |
 | `auth.username` | (required) | Basic auth username (stored in Secret) |
 | `auth.password` | (required) | Basic auth password (stored in Secret) |
 | `env.listenAddr` | `:3000` | `LISTEN_ADDR` |
-| `env.namespace` | `""` | `NAMESPACE` (empty = all) |
+| `env.namespace` | `"-"` | `NAMESPACE` — sentinel `"-"` resolves to `.Release.Namespace` (Role, safe default); `""` watches all namespaces (ClusterRole); any other value watches that specific namespace (Role) |
 | `env.refreshInterval` | `"5"` | `REFRESH_INTERVAL` |
 | `env.jobHistoryLimit` | `"5"` | `JOB_HISTORY_LIMIT` |
 | `ingress.enabled` | `false` | Enable ingress |
@@ -254,8 +253,27 @@ deploy/charts/k8s-crondash/
 **RBAC permissions needed:**
 - `get`, `list`, `watch` on `cronjobs` and `jobs`
 - `create` on `jobs` (for manual trigger)
-- When `rbac.namespaced=true` + `NAMESPACE` is set: `Role` + `RoleBinding` scoped to that namespace — `ClusterRole` and `ClusterRoleBinding` templates are excluded entirely
-- When `rbac.namespaced=false`: `ClusterRole` + `ClusterRoleBinding` — `Role` and `RoleBinding` templates are excluded entirely
+- RBAC type is derived from `env.namespace` (no separate toggle):
+  - `env.namespace: "-"` (default sentinel): resolves to `.Release.Namespace` in templates → `Role` + `RoleBinding` scoped to release namespace — least privilege, safe default
+  - `env.namespace: ""` (empty): watches all namespaces → `ClusterRole` + `ClusterRoleBinding` — matches the watch-all scope
+  - `env.namespace: "my-ns"` (explicit): watches that namespace → `Role` + `RoleBinding` scoped to `my-ns`
+- Sentinel logic: templates use `{{ if eq .Values.env.namespace "-" }}{{ .Release.Namespace }}{{ else }}{{ .Values.env.namespace }}{{ end }}` to resolve the namespace
+- `rbac.create` toggle remains for BYO RBAC scenarios
+
+**securityContext** (pod + container):
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+# per-container:
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+```
 
 **Replica count guard** in `_helpers.tpl`:
 ```yaml
@@ -505,48 +523,64 @@ Chart is an unstable alpha — no stability guarantees, breaking changes at any 
 - [x] Create `.dockerignore` — exclude `.git/`, `build/`, `.github/`, `*.md` (except none needed in build), `mise.toml`, `renovate.json`, `.golangci.yml`, `.crush.json`, `cj.yml`, `UNLICENSE`
 - [x] Create `Dockerfile` — multi-stage build:
   - **Stage 1 (builder):** `golang:1.26-alpine` (matching go.mod toolchain), `apk add git just`, `WORKDIR /src`, `COPY go.mod go.sum ./`, `COPY vendor/ vendor/`, `COPY . .`, `ARG BUILD_VERSION=0.0.0` + `ARG BUILD_COMMIT=unknown`, run `just version="${BUILD_VERSION}" commit_sha="${BUILD_COMMIT}" build` (just overrides version/commit from host, build_date computed inside container to preserve Docker cache), `mv build/k8s-crondash-linux-* /bin/k8s-crondash`
-  - **Stage 2 (runtime):** `scratch`, `COPY --from=builder /bin/k8s-crondash /bin/k8s-crondash`, `EXPOSE 3000`, `ENTRYPOINT ["k8s-crondash"]`
+  - **Stage 2 (runtime):** `scratch`, `USER 65534`, `COPY --from=builder /bin/k8s-crondash /bin/k8s-crondash`, `EXPOSE 3000`, `ENTRYPOINT ["k8s-crondash"]`
 - [x] Add `docker-build` recipe to justfile — `docker build -t k8s-crondash:latest .` (no `just build` dependency, Dockerfile handles templ + go build internally)
 - [x] Verify: `just docker-build` produces image, `docker run --rm -p 3000:3000 k8s-crondash:latest --help` prints usage
 
 #### 5b — Helm Chart
 
-- [ ] Create `deploy/charts/k8s-crondash/Chart.yaml` — `apiVersion: v2`, `name: k8s-crondash`, `version: 0.0.0`, `appVersion: "0.0.0"`, `description: Web dashboard for Kubernetes CronJobs`
-- [ ] Create `deploy/charts/k8s-crondash/values.yaml` with defaults:
+- [x] Create `deploy/charts/k8s-crondash/Chart.yaml` — `apiVersion: v2`, `name: k8s-crondash`, `version: 0.0.0`, `appVersion: "0.0.0"`, `description: Web dashboard for Kubernetes CronJobs`
+- [x] Create `deploy/charts/k8s-crondash/values.yaml` with defaults:
   - `replicaCount: 1`
   - `image.repository: k8s-crondash`, `image.tag: latest`, `image.pullPolicy: Always`
   - `service.port: 80`, `service.targetPort: 3000`
-  - `rbac.create: true`, `rbac.namespaced: false`
+  - `rbac.create: true`
   - `auth.username: ""` (required), `auth.password: ""` (required)
-  - `env.listenAddr: ":3000"`, `env.namespace: ""`, `env.refreshInterval: "5"`, `env.jobHistoryLimit: "5"`
+  - `env.listenAddr: ":3000"`, `env.namespace: "-"` (sentinel, resolves to `.Release.Namespace`), `env.refreshInterval: "5"`, `env.jobHistoryLimit: "5"`
   - `ingress.enabled: false`, `ingress` scaffold (className, hosts, tls)
+  - `securityContext:` pod-level (`runAsNonRoot`, `runAsUser: 65534`, `seccompProfile`) + container-level (`allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `readOnlyRootFilesystem: true`)
   - `resources:` with minimal requests (cpu: 50m, memory: 64Mi)
   - `livenessProbe`: HTTP GET `/healthz` on port 3000, `periodSeconds: 10`
   - `readinessProbe`: HTTP GET `/readyz` on port 3000, `periodSeconds: 10`, `initialDelaySeconds: 5`
-- [ ] Create `deploy/charts/k8s-crondash/templates/_helpers.tpl`:
+- [x] Create `deploy/charts/k8s-crondash/templates/_helpers.tpl`:
   - `k8s-crondash.name`: chart name
   - `k8s-crondash.labels`: standard Helm labels (helm.sh/chart, app.kubernetes.io/name, app.kubernetes.io/instance, app.kubernetes.io/version, app.kubernetes.io/managed-by)
   - `k8s-crondash.selectorLabels`: app.kubernetes.io/name + app.kubernetes.io/instance
-  - `k8s-crondash.replicaGuard`: fail if `replicaCount > 1` with message referencing Trigger Safety
-- [ ] Create `deploy/charts/k8s-crondash/templates/deployment.yaml`:
+  - `k8s-crondash.resolveNamespace`: resolves the sentinel — returns `.Release.Namespace` when `env.namespace` is `"-"`, otherwise returns `env.namespace` as-is
+- [x] Create `deploy/charts/k8s-crondash/templates/deployment.yaml`:
   - `strategy: Recreate`
+  - Pod-level `securityContext`: `runAsNonRoot`, `runAsUser: 65534`, `seccompProfile: RuntimeDefault`
+  - Container-level `securityContext`: `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `readOnlyRootFilesystem: true`
   - Single container with image, ports (3000), env vars from ConfigMap + Secret
   - `LIVEN_ADDR` from `env.listenAddr`, `NAMESPACE` from `env.namespace`, `REFRESH_INTERVAL` from `env.refreshInterval`, `JOB_HISTORY_LIMIT` from `env.jobHistoryLimit`
   - `AUTH_USERNAME` from secret key `username`, `AUTH_PASSWORD` from secret key `password`
   - `livenessProbe` + `readinessProbe` wired from values
   - Resource limits from values
   - ServiceAccount name
-- [ ] Create `deploy/charts/k8s-crondash/templates/service.yaml` — ClusterIP, port mapping (servicePort → targetPort 3000)
-- [ ] Create `deploy/charts/k8s-crondash/templates/serviceaccount.yaml` — always created, `automountServiceAccountToken: true`
-- [ ] Create `deploy/charts/k8s-crondash/templates/secret.yaml` — `auth.username` and `auth.password` from values, `type: Opaque`
-- [ ] Create `deploy/charts/k8s-crondash/templates/configmap.yaml` — `LISTEN_ADDR`, `NAMESPACE`, `REFRESH_INTERVAL`, `JOB_HISTORY_LIMIT` from values
-- [ ] Create `deploy/charts/k8s-crondash/templates/clusterrole.yaml` + `clusterrolebinding.yaml` — conditional on `rbac.create` and `not rbac.namespaced`; permissions: `get`, `list`, `watch` on `cronjobs` and `jobs`, `create` on `jobs`
-- [ ] Create `deploy/charts/k8s-crondash/templates/role.yaml` + `rolebinding.yaml` — conditional on `rbac.create` and `rbac.namespaced`; same permissions, scoped to `NAMESPACE` (or `"default"` if empty)
-- [ ] Create `deploy/charts/k8s-crondash/templates/ingress.yaml` — conditional on `ingress.enabled`, supports `spec.ingressClassName`, host/path rules, TLS
-- [ ] Create `deploy/charts/k8s-crondash/templates/NOTES.txt` — post-install message showing how to access the dashboard (port-forward command, service URL)
-- [ ] Add `helm-lint` recipe to justfile — `helm lint deploy/charts/k8s-crondash`
-- [ ] Add `helm-template` recipe to justfile — `helm template k8s-crondash deploy/charts/k8s-crondash`
-- [ ] Verify: `just helm-lint` passes with no errors or warnings, `just helm-template` renders all templates
+- [x] Create `deploy/charts/k8s-crondash/templates/service.yaml` — ClusterIP, port mapping (servicePort → targetPort 3000)
+- [x] Create `deploy/charts/k8s-crondash/templates/serviceaccount.yaml` — always created, `automountServiceAccountToken: true`
+- [x] Create `deploy/charts/k8s-crondash/templates/secret.yaml` — `auth.username` and `auth.password` from values, `type: Opaque`
+- [x] Create `deploy/charts/k8s-crondash/templates/configmap.yaml` — `LISTEN_ADDR`, `NAMESPACE` (resolved via `k8s-crondash.resolveNamespace`), `REFRESH_INTERVAL`, `JOB_HISTORY_LIMIT` from values
+- [x] Create `deploy/charts/k8s-crondash/templates/clusterrole.yaml` + `clusterrolebinding.yaml` — conditional on `rbac.create` and `env.namespace` being `""` (empty = watch all); permissions: `get`, `list`, `watch` on `cronjobs` and `jobs`, `create` on `jobs`
+- [x] Create `deploy/charts/k8s-crondash/templates/role.yaml` + `rolebinding.yaml` — conditional on `rbac.create` and `env.namespace` being non-empty (set or sentinel); same permissions, namespace resolved via `k8s-crondash.resolveNamespace` helper
+- [x] Create `deploy/charts/k8s-crondash/templates/ingress.yaml` — conditional on `ingress.enabled`, supports `spec.ingressClassName`, host/path rules, TLS
+- [x] Create `deploy/charts/k8s-crondash/templates/NOTES.txt` — post-install message showing how to access the dashboard (port-forward command, service URL)
+- [x] Add `helm-lint` recipe to justfile — `helm lint deploy/charts/k8s-crondash`
+- [x] Add `helm-conform` recipe to justfile  - renders helm chart and validates it via kubeconform
+- [x] Verify: `just helm-lint` passes with no errors or warnings, `just helm-conform` passes
+
+**Post-5b hardening (apply before smoke test):**
+
+- [x] `Dockerfile` — add `USER 65534` to runtime stage (run as non-root)
+- [x] `deploy/charts/k8s-crondash/values.yaml` — add `securityContext` defaults (pod-level + container-level, see Packaging & Deployment section)
+- [x] `deploy/charts/k8s-crondash/templates/deployment.yaml` — wire pod-level and container-level `securityContext` from values
+- [x] RBAC simplification — remove `rbac.namespaced` from values.yaml, derive RBAC type from `env.namespace`:
+  - `clusterrole.yaml` + `clusterrolebinding.yaml`: conditional on `rbac.create` and `env.namespace` being `""` (empty = watch all)
+  - `role.yaml` + `rolebinding.yaml`: conditional on `rbac.create` and `env.namespace` being non-empty (`"-"` sentinel or explicit namespace)
+  - Namespace in Role/RoleBinding/ConfigMap resolved via `k8s-crondash.resolveNamespace` helper (sentinel `"-"` → `.Release.Namespace`)
+- [x] `deploy/charts/k8s-crondash/values.yaml` — change `env.namespace` default from `""` to `"-"` (sentinel for `.Release.Namespace`)
+- [x] `deploy/charts/k8s-crondash/templates/_helpers.tpl` — add `resolveNamespace` helper, remove `rbacGuard`
+- [x] Verify: `just helm-lint` passes with no errors or warnings, `just helm-conform` passes
 
 #### 5c — README
 
