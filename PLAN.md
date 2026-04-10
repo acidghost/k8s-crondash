@@ -584,7 +584,7 @@ Chart is an unstable alpha — no stability guarantees, breaking changes at any 
 
 #### 5c — README
 
-- [ ] Write `README.md`:
+- [x] Write `README.md`:
   - Project description — what k8s-crondash does (one-paragraph summary)
   - Quick start (Helm): `helm install` example with `--set auth.username=admin,auth.password=changeme`, port-forward command
   - Docker usage: `docker run` example with required env vars (`AUTH_USERNAME`, `AUTH_PASSWORD`)
