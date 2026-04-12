@@ -1,0 +1,38 @@
+name: Publish Chart
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: "Container registry URL"
+        required: false
+        default: "ghcr.io"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions: {}
+
+jobs:
+  publish-chart:
+    name: Publish Chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed to push helm chart
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          version: 2026.4.9
+
+      - name: Log in to registry
+        run: helm registry login "${INPUTS_REGISTRY}" --username "${GITHUB_ACTOR}" --password "$GITHUB_TOKEN"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUTS_REGISTRY: ${{ inputs.registry }}
+
+      - run: just helm-push
