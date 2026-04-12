@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: k8s-crondash
+  repository: ghcr.io/acidghost/k8s-crondash
   tag: latest
   pullPolicy: Always
 
