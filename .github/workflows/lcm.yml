@@ -3,7 +3,7 @@ name: LCM
 on:
   pull_request:
     branches:
-      - renovate/**
+      - main
 
 permissions: {}
 
