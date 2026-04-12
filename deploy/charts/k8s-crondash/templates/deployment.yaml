@@ -29,6 +29,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: 3000
+              name: http
               protocol: TCP
           envFrom:
             - configMapRef:
