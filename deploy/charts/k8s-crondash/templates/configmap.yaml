@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "k8s-crondash.labels" . | nindent 4 }}
 data:
-  LISTEN_ADDR: {{ .Values.env.listenAddr | quote }}
-  NAMESPACE: {{ include "k8s-crondash.resolveNamespace" . | quote }}
-  REFRESH_INTERVAL: {{ .Values.env.refreshInterval | quote }}
-  JOB_HISTORY_LIMIT: {{ .Values.env.jobHistoryLimit | quote }}
+  CRONDASH_LISTEN_ADDR: {{ .Values.env.listenAddr | quote }}
+  CRONDASH_NAMESPACE: {{ include "k8s-crondash.resolveNamespace" . | quote }}
+  CRONDASH_REFRESH_INTERVAL: {{ .Values.env.refreshInterval | quote }}
+  CRONDASH_JOB_HISTORY_LIMIT: {{ .Values.env.jobHistoryLimit | quote }}
