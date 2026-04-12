@@ -37,7 +37,9 @@ build os=goos arch=goarch: generate build-dir
 build-dir:
     mkdir -p build
 
-run *args: build
+run *args: build (run-only args)
+
+run-only *args:
     ./build/{{program}}-{{goos}}-{{goarch}} {{args}}
 
 build-image:
