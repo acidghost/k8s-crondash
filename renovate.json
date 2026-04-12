@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices"],
+  "automerge": true,
+  "labels": ["renovate", "lcm/{{updateType}}"],
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["patch", "minor"],
+      "addLabels": ["lcm/approve"]
+    }
+  ]
+}
