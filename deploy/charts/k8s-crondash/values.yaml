@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/acidghost/k8s-crondash
-  tag: latest
+  tag: latest@sha256:1eb7330269efbd025b56fa6dae0cb1e099063b41ed7892ca749c4ad24ca8abb0
   pullPolicy: Always
 
 service:
