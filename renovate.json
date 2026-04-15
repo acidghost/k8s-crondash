@@ -9,6 +9,10 @@
     {
       "matchUpdateTypes": ["patch", "minor"],
       "addLabels": ["lcm/approve"]
+    },
+    {
+      "matchPackageNames": ["ghcr.io/acidghost/k8s-crondash"],
+      "enabled": false
     }
   ]
 }
