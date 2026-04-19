@@ -5,6 +5,7 @@
   "automerge": true,
   "labels": ["renovate", "lcm/{{updateType}}"],
   "minimumReleaseAge": "3 days",
+  "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
     {
       "matchUpdateTypes": ["patch", "minor"],
