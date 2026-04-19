@@ -8,9 +8,9 @@ require (
 	github.com/a-h/templ v0.3.1001
 	github.com/alecthomas/kong v1.15.0
 	github.com/gofiber/fiber/v3 v3.1.0
-	k8s.io/api v0.35.3
+	k8s.io/api v0.35.4
 	k8s.io/apimachinery v0.35.4
-	k8s.io/client-go v0.35.3
+	k8s.io/client-go v0.35.4
 )
 
 require (
