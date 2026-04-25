@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -175,5 +176,99 @@ func TestListJobs_RespectsLabelSelector(t *testing.T) {
 	}
 	if len(jobs) != 3 {
 		t.Errorf("expected 3 jobs, got %d", len(jobs))
+	}
+}
+
+func TestListJobs_MatchesByOwnerReference(t *testing.T) {
+	clientset := fake.NewClientset()
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "owner-ref-job",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "batch/v1",
+					Kind:       "CronJob",
+					Name:       "test-cj",
+				},
+			},
+		},
+	}
+	_, err := clientset.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create owner-ref test job: %v", err)
+	}
+
+	jobs, err := ListJobs(context.Background(), clientset, "default", "test-cj", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Name != "owner-ref-job" {
+		t.Fatalf("expected owner-ref-job, got %s", jobs[0].Name)
+	}
+}
+
+func TestListJobs_MatchesLegacyCronJobLabel(t *testing.T) {
+	clientset := fake.NewClientset()
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-label-job",
+			Namespace: "default",
+			Labels: map[string]string{
+				"cronjob.kubernetes.io/instance": "test-cj",
+			},
+		},
+	}
+	_, err := clientset.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create legacy-label test job: %v", err)
+	}
+
+	jobs, err := ListJobs(context.Background(), clientset, "default", "test-cj", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Name != "legacy-label-job" {
+		t.Fatalf("expected legacy-label-job, got %s", jobs[0].Name)
+	}
+}
+
+func TestListJobs_LimitReturnsNewestJobs(t *testing.T) {
+	clientset := fake.NewClientset()
+
+	for i := 0; i < 3; i++ {
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-cj-job-" + string(rune('0'+i)),
+				Namespace:         "default",
+				CreationTimestamp: metav1.NewTime(time.Date(2025, 1, 1, 0, i, 0, 0, time.UTC)),
+				Labels: map[string]string{
+					"batch.kubernetes.io/cronjob": "test-cj",
+				},
+			},
+		}
+		_, err := clientset.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("failed to create test job %d: %v", i, err)
+		}
+	}
+
+	jobs, err := ListJobs(context.Background(), clientset, "default", "test-cj", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(jobs))
+	}
+	if jobs[0].Name != "test-cj-job-2" || jobs[1].Name != "test-cj-job-1" {
+		t.Fatalf("expected newest jobs first, got %s then %s", jobs[0].Name, jobs[1].Name)
 	}
 }

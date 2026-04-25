@@ -181,6 +181,85 @@ func TestListCronJobs_WithJobHistory(t *testing.T) {
 	}
 }
 
+func TestListCronJobs_UsesStatusCountersWhenConditionsMissing(t *testing.T) {
+	suspend := false
+	clientset := fake.NewClientset()
+
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+	}
+	_, err := clientset.BatchV1().CronJobs("default").Create(context.Background(), cj, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create test cronjob: %v", err)
+	}
+
+	successTime := metav1.NewTime(time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC))
+	failureTime := metav1.NewTime(time.Date(2025, 2, 1, 13, 0, 0, 0, time.UTC))
+
+	succeededJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj-success",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "CronJob",
+				Name:       "test-cj",
+			}},
+		},
+		Status: batchv1.JobStatus{
+			Succeeded:      1,
+			CompletionTime: &successTime,
+		},
+	}
+	_, err = clientset.BatchV1().Jobs("default").Create(context.Background(), succeededJob, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create succeeded test job: %v", err)
+	}
+
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj-failure",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "CronJob",
+				Name:       "test-cj",
+			}},
+		},
+		Status: batchv1.JobStatus{
+			Failed:         1,
+			CompletionTime: &failureTime,
+		},
+	}
+	_, err = clientset.BatchV1().Jobs("default").Create(context.Background(), failedJob, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create failed test job: %v", err)
+	}
+
+	cronJobs, err := ListCronJobs(context.Background(), clientset, "default", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cronJobs) != 1 {
+		t.Fatalf("expected 1 cronjob, got %d", len(cronJobs))
+	}
+
+	display := cronJobs[0]
+	if display.LastSuccess == nil || !display.LastSuccess.Equal(successTime.Time) {
+		t.Fatalf("expected last success %v, got %v", successTime.Time, display.LastSuccess)
+	}
+	if display.LastFailure == nil || !display.LastFailure.Equal(failureTime.Time) {
+		t.Fatalf("expected last failure %v, got %v", failureTime.Time, display.LastFailure)
+	}
+}
+
 func TestTriggerCronJob_Success(t *testing.T) {
 	suspend := false
 	clientset := fake.NewClientset()

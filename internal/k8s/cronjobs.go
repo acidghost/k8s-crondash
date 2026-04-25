@@ -60,25 +60,51 @@ func processJobs(jobs []batchv1.Job, display *CronJobDisplay) {
 		if isJobRunning(&job) {
 			display.ActiveJobs++
 		}
+
+		hasCompleteCondition := false
+		hasFailedCondition := false
 		for _, c := range job.Status.Conditions {
 			switch c.Type {
 			case batchv1.JobComplete:
 				if c.Status == "True" {
-					t := c.LastTransitionTime.Time
-					if display.LastSuccess == nil || t.After(*display.LastSuccess) {
-						display.LastSuccess = &t
-					}
+					hasCompleteCondition = true
+					setLatestTime(&display.LastSuccess, c.LastTransitionTime.Time)
 				}
 			case batchv1.JobFailed:
 				if c.Status == "True" {
-					t := c.LastTransitionTime.Time
-					if display.LastFailure == nil || t.After(*display.LastFailure) {
-						display.LastFailure = &t
-					}
+					hasFailedCondition = true
+					setLatestTime(&display.LastFailure, c.LastTransitionTime.Time)
 				}
 			}
 		}
+
+		if !hasCompleteCondition && job.Status.Succeeded > 0 {
+			setLatestTime(&display.LastSuccess, completionOrCreationTime(job))
+		}
+		if !hasFailedCondition && job.Status.Failed > 0 {
+			setLatestTime(&display.LastFailure, completionOrCreationTime(job))
+		}
 	}
+}
+
+func setLatestTime(target **time.Time, candidate time.Time) {
+	if candidate.IsZero() {
+		return
+	}
+	if *target == nil || candidate.After(**target) {
+		t := candidate
+		*target = &t
+	}
+}
+
+func completionOrCreationTime(job batchv1.Job) time.Time {
+	if job.Status.CompletionTime != nil {
+		return job.Status.CompletionTime.Time
+	}
+	if job.Status.StartTime != nil {
+		return job.Status.StartTime.Time
+	}
+	return job.CreationTimestamp.Time
 }
 
 func TriggerCronJob(ctx context.Context, clientset kubernetes.Interface, ns, name string) error {
