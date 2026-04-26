@@ -8,51 +8,70 @@ import (
 )
 
 templ CronJobCards(jobs []k8s.CronJobDisplay, showNamespace bool) {
-	for _, job := range jobs {
-		@cronJobCard(job, showNamespace)
+	for i, job := range jobs {
+		@cronJobCard(i, job, showNamespace)
 	}
 	if len(jobs) == 0 {
 		@EmptyState("")
 	}
 }
 
-templ cronJobCard(job k8s.CronJobDisplay, showNamespace bool) {
-	<div class="box cronjob-card">
+templ cronJobCard(i int, job k8s.CronJobDisplay, showNamespace bool) {
+	<div
+		class="box cronjob-card"
+		if i%2==0 {
+			data-cols@l="1"
+		} else {
+			data-cols@l="2"
+		}
+		data-cols@s="1 2"
+	>
 		<div class="flex-row justify-content:space-between align-items:center">
 			<h2 class="bold">{ job.Name }</h2>
 			@statusChip(job)
 		</div>
 		if showNamespace {
-			<p class="secondary-font" style="margin-block-start:0"><span class="mono-font">{ job.Namespace }</span></p>
+			<p class="secondary-font margin-block-start:0">
+				<span class="mono-font">{ job.Namespace }</span>
+			</p>
 		}
-		<div class="flex-row justify-content:space-between" style="margin-block-start:var(--density, 1rem)">
-			<span class="mono-font secondary-font">{ job.Schedule }</span>
-			<span class="secondary-font">{ fmt.Sprintf("%d active", job.ActiveJobs) }</span>
+		<div class="table rows packed">
+			<div class="flex-row justify-content:space-between">
+				<span class="secondary-font">Schedule</span>
+				<span class="mono-font secondary-font">{ job.Schedule }</span>
+			</div>
+			<div class="flex-row justify-content:space-between">
+				<span class="secondary-font">Active jobs</span>
+				<span class="secondary-font">{ fmt.Sprintf("%d active", job.ActiveJobs) }</span>
+			</div>
+			<div class="flex-row justify-content:space-between">
+				<span class="secondary-font">Last success</span>
+				<span class="secondary-font">✓ { formatTime(job.LastSuccess) }</span>
+			</div>
+			<div class="flex-row justify-content:space-between">
+				<span class="secondary-font">Last failure</span>
+				<span class="secondary-font">✗ { formatTime(job.LastFailure) }</span>
+			</div>
 		</div>
-		<div class="flex-row justify-content:space-between" style="margin-block-start:var(--density, 1rem)">
-			<span class="secondary-font">✓ { formatTime(job.LastSuccess) }</span>
-			<span class="secondary-font">✗ { formatTime(job.LastFailure) }</span>
-		</div>
-		<div style="margin-block-start:var(--density, 1rem)">
+		<div class="margin-block-start">
 			if job.Suspended {
 				<button disabled title="Cannot trigger suspended cronjob">Trigger</button>
-			} else if job.ActiveJobs > 0 {
-				<a
-					class="<button>"
-					href={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
-					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
-					hx-target="#modal-container"
-					hx-swap="innerHTML"
-					title="A job is already running"
-				>⚠ Trigger</a>
 			} else {
 				<a
 					class="<button>"
 					href={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
-					hx-get={ fmt.Sprintf("/trigger-confirm/%s/%s", job.Namespace, job.Name) }
-					hx-target="#modal-container"
-					hx-swap="innerHTML"
-				>Trigger</a>
+					onclick="event.preventDefault();this.nextElementSibling.showModal();return false;"
+					if job.ActiveJobs > 0 {
+						title="A job is already running"
+					}
+				>
+					if job.ActiveJobs > 0 {
+						⚠ Trigger
+					} else {
+						Trigger
+					}
+				</a>
+				@TriggerConfirmDialog(triggerConfirmLabelID(i), job)
 			}
 		</div>
 	</div>
@@ -71,41 +90,54 @@ templ statusChip(job k8s.CronJobDisplay) {
 }
 
 templ EmptyState(namespace string) {
-	<div class="box plain center">
+	<div class="box plain center empty-state">
 		<p>No CronJobs found in namespace <strong>{ namespaceLabel(namespace) }</strong>.</p>
 		<p style="color:var(--muted-fg)">CronJobs will appear here once they are created in the cluster.</p>
 	</div>
 }
 
-templ TriggerConfirmModal(job k8s.CronJobDisplay) {
-	<dialog open style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:50">
-		<div class="box">
-			<h2>Trigger CronJob?</h2>
-			<p><strong>{ job.Name }</strong> <span class="secondary-font">in <span class="mono-font">{ job.Namespace }</span></span></p>
-			if job.ActiveJobs > 0 {
-				<p class="chip warn" style="margin-block:var(--density, 1rem)">⚠ A job is already running for this CronJob.</p>
-			}
-			<div class="flex-row" style="gap:var(--density, 1rem);margin-block-start:var(--density, 1rem)">
-				<form method="POST" action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } hx-post={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } hx-target="#modal-container" hx-swap="innerHTML" style="display:inline">
-					<button type="submit">Confirm</button>
-				</form>
-				<a href="/" class="<button>" onclick="event.preventDefault();this.closest('dialog').close();document.getElementById('modal-container').innerHTML=''">Cancel</a>
-			</div>
+templ TriggerConfirmDialog(labelID string, job k8s.CronJobDisplay) {
+	<dialog
+		aria-labelledby={ labelID }
+		onclick="event.target===this&&this.close()"
+	>
+		<strong id={ labelID } class="block titlebar">Trigger CronJob?</strong>
+		@TriggerConfirmDetails(job)
+		<div class="flex-row dense justify-content:end margin-block">
+			<form
+				method="POST"
+				action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) }
+				hx-post={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) }
+				hx-swap="none"
+				class="inline"
+			>
+				<button type="submit" autofocus onclick="this.closest('dialog').close()">Confirm</button>
+			</form>
+			<button type="button" onclick="this.closest('dialog').close()">Cancel</button>
 		</div>
 	</dialog>
 }
 
+templ TriggerConfirmDetails(job k8s.CronJobDisplay) {
+	<p class="bold mono-font margin:0">{ fmt.Sprintf("%s/%s", job.Namespace, job.Name) }</p>
+	<p class="secondary-font margin:0">This creates a new Job from the CronJob template.</p>
+	if job.ActiveJobs > 0 {
+		<p class="chip warn">⚠ A job is already running for this CronJob.</p>
+	}
+}
+
 templ TriggerConfirmPage(job k8s.CronJobDisplay) {
 	@Layout("k8s-crondash") {
-		<div class="container" style="max-width:40rem;margin-block-start:2rem">
-			<div class="box">
+		<div class="container">
+			<div class="box confirm-box">
 				<h2>Trigger CronJob?</h2>
-				<p><strong>{ job.Name }</strong> <span class="secondary-font">in <span class="mono-font">{ job.Namespace }</span></span></p>
-				if job.ActiveJobs > 0 {
-					<p class="chip warn" style="margin-block:var(--density, 1rem)">⚠ A job is already running for this CronJob.</p>
-				}
-				<div class="flex-row" style="gap:var(--density, 1rem);margin-block-start:var(--density, 1rem)">
-					<form method="POST" action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) } style="display:inline">
+				@TriggerConfirmDetails(job)
+				<div class="flex-row dense margin-block">
+					<form
+						method="POST"
+						action={ fmt.Sprintf("/trigger/%s/%s", job.Namespace, job.Name) }
+						class="inline"
+					>
 						<button type="submit">Confirm</button>
 					</form>
 					<a href="/" class="<button>">Cancel</a>
@@ -120,14 +152,20 @@ templ Toast(message string, ok bool) {
 		<div hx-swap-oob="true" hx-target="#toast-container" id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100">
 			<span class="chip ok">{ message }</span>
 		</div>
-		<script>setTimeout(function(){document.getElementById('toast-container').innerHTML=''},4000)</script>
-		<div id="modal-container"></div>
+		<script>
+			setTimeout(function () {
+				document.getElementById("toast-container").innerHTML = "";
+			}, 4000);
+		</script>
 	} else {
 		<div hx-swap-oob="true" hx-target="#toast-container" id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100">
 			<span class="chip bad">{ message }</span>
 		</div>
-		<script>setTimeout(function(){document.getElementById('toast-container').innerHTML=''},4000)</script>
-		<div id="modal-container"></div>
+		<script>
+			setTimeout(function () {
+				document.getElementById("toast-container").innerHTML = "";
+			}, 4000);
+		</script>
 	}
 }
 
@@ -153,4 +191,8 @@ func namespaceLabel(namespace string) string {
 		return "all"
 	}
 	return namespace
+}
+
+func triggerConfirmLabelID(i int) string {
+	return fmt.Sprintf("trigger-cronjob-dialog-title-%d", i)
 }

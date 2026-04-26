@@ -39,7 +39,7 @@ func setupTriggerApp(svc CronJobService) *fiber.App {
 	return app
 }
 
-func TestConfirmModal_HTMX_ReturnsDialogHTML(t *testing.T) {
+func TestConfirmModal_HTMX_ReturnsFullPage(t *testing.T) {
 	svc := &triggerMockService{
 		jobs: []k8s.CronJobDisplay{
 			{Name: "my-cron", Namespace: "default", Schedule: "*/5 * * * *"},
@@ -62,8 +62,8 @@ func TestConfirmModal_HTMX_ReturnsDialogHTML(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
-	if !strings.Contains(html, "<dialog") {
-		t.Error("should contain dialog element")
+	if !strings.Contains(html, "<!doctype html>") {
+		t.Error("HTMX requests should now get the full fallback page")
 	}
 	if !strings.Contains(html, "my-cron") {
 		t.Error("should contain cronjob name")
@@ -73,6 +73,9 @@ func TestConfirmModal_HTMX_ReturnsDialogHTML(t *testing.T) {
 	}
 	if !strings.Contains(html, "/trigger/default/my-cron") {
 		t.Error("should contain trigger POST URL")
+	}
+	if strings.Contains(html, "<dialog") {
+		t.Error("confirm route should no longer render a dialog fragment")
 	}
 }
 
@@ -135,7 +138,7 @@ func TestConfirmModal_RunningJob_ShowsWarning(t *testing.T) {
 	html := string(body)
 
 	if !strings.Contains(html, "already running") {
-		t.Error("should show running warning in modal")
+		t.Error("should show running warning on the fallback page")
 	}
 }
 
@@ -186,9 +189,6 @@ func TestTrigger_HTMX_Success_ReturnsToast(t *testing.T) {
 	}
 	if !strings.Contains(html, "toast-container") {
 		t.Error("should contain toast container OOB swap")
-	}
-	if !strings.Contains(html, "modal-container") {
-		t.Error("should clear modal container")
 	}
 	if !strings.Contains(html, "setTimeout") {
 		t.Error("should contain auto-dismiss script")

@@ -7,19 +7,16 @@ import (
 )
 
 templ Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval int, namespace string, flash string, flashType string) {
-	@Layout("k8s-crondash") {
-		<div class="container">
+	@LayoutWithNavbar("k8s-crondash", DashboardNavbar(jobs, refreshInterval, namespace)) {
+		<div class="dashboard-page">
 			@FlashBanner(flash, flashType)
-			<div style="margin-block-end:var(--density, 1rem)">
-				<a href="/" class="<button>">Refresh</a>
-			</div>
 			<div
 				id="cronjob-cards"
 				class="grid spacious"
 				data-cols@s="1"
 				data-cols@l="3"
 				hx-get="/cronjobs"
-				hx-trigger={ fmt.Sprintf("every %ds", refreshInterval) }
+				hx-trigger={ fmt.Sprintf("every %ds [document.querySelector('dialog[open]') == null]", refreshInterval) }
 				hx-swap="innerHTML"
 			>
 				@CronJobCards(jobs, showNamespace)
@@ -29,4 +26,46 @@ templ Dashboard(jobs []k8s.CronJobDisplay, showNamespace bool, refreshInterval i
 			}
 		</div>
 	}
+}
+
+templ DashboardNavbar(jobs []k8s.CronJobDisplay, refreshInterval int, namespace string) {
+	<div class="flex-row flex-wrap:wrap margin:0 crowded">
+		<span class="chip plain">Namespace: <span class="mono-font">{ namespaceLabel(namespace) }</span></span>
+		<span class="chip plain">Auto-refresh: { fmt.Sprintf("%ds", refreshInterval) }</span>
+		<span class="chip plain">{ fmt.Sprintf("%d total", len(jobs)) }</span>
+		<span class="chip ok">{ fmt.Sprintf("%d running", runningCount(jobs)) }</span>
+		<span class="chip warn">{ fmt.Sprintf("%d suspended", suspendedCount(jobs)) }</span>
+		<span class="chip plain">{ fmt.Sprintf("%d idle", idleCount(jobs)) }</span>
+	</div>
+	<a href="/" class="<button>">Refresh</a>
+}
+
+func runningCount(jobs []k8s.CronJobDisplay) int {
+	count := 0
+	for _, job := range jobs {
+		if !job.Suspended && job.ActiveJobs > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func suspendedCount(jobs []k8s.CronJobDisplay) int {
+	count := 0
+	for _, job := range jobs {
+		if job.Suspended {
+			count++
+		}
+	}
+	return count
+}
+
+func idleCount(jobs []k8s.CronJobDisplay) int {
+	count := 0
+	for _, job := range jobs {
+		if !job.Suspended && job.ActiveJobs == 0 {
+			count++
+		}
+	}
+	return count
 }

@@ -33,9 +33,6 @@ func (h *TriggerHandler) ConfirmModal(c fiber.Ctx) error {
 
 	for _, job := range jobs {
 		if job.Namespace == ns && job.Name == name {
-			if views.IsHTMX(c) {
-				return views.Render(c, views.TriggerConfirmModal(job))
-			}
 			return views.Render(c, views.TriggerConfirmPage(job))
 		}
 	}

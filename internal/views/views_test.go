@@ -41,6 +41,9 @@ func TestDashboard_ContainsHTMXAttributes(t *testing.T) {
 	if !strings.Contains(html, `every 10s`) {
 		t.Error("should contain refresh interval in hx-trigger")
 	}
+	if !strings.Contains(html, `dialog[open]`) {
+		t.Error("should pause polling while a dialog is open")
+	}
 	if !strings.Contains(html, `hx-swap="innerHTML"`) {
 		t.Error("should contain hx-swap attribute")
 	}
@@ -78,7 +81,7 @@ func TestDashboard_FlashBannerError(t *testing.T) {
 
 func TestDashboard_NoFlashBanner(t *testing.T) {
 	html := renderToString(t, Dashboard([]k8s.CronJobDisplay{}, true, 5, "", "", ""))
-	if strings.Contains(html, "chip ok") || strings.Contains(html, "chip bad") {
+	if strings.Contains(html, `chip ok" style="margin-block-end:var(--density, 1rem)`) || strings.Contains(html, `chip bad" style="margin-block-end:var(--density, 1rem)`) {
 		t.Error("should not render flash banner when flash is empty")
 	}
 }
@@ -174,8 +177,11 @@ func TestCronJobCards_TriggerButtonIsLink(t *testing.T) {
 	if !strings.Contains(html, `href="/trigger-confirm/default/idle-job"`) {
 		t.Error("trigger button should be an <a> tag with href for no-JS fallback")
 	}
-	if !strings.Contains(html, `hx-get="/trigger-confirm/default/idle-job"`) {
-		t.Error("trigger link should have hx-get for HTMX")
+	if !strings.Contains(html, `onclick="event.preventDefault();this.nextElementSibling.showModal();return false;"`) {
+		t.Error("trigger link should open the inline dialog via onclick without navigating")
+	}
+	if strings.Contains(html, `hx-get="/trigger-confirm/default/idle-job"`) {
+		t.Error("trigger link should no longer fetch a remote modal")
 	}
 	if !strings.Contains(html, `class="<button>"`) {
 		t.Error("trigger link should have class=<button> for styling")
@@ -204,6 +210,9 @@ func TestCronJobCards_TriggerButtonRunningIsLink(t *testing.T) {
 	}
 	if !strings.Contains(html, "⚠ Trigger") {
 		t.Error("running job trigger should show warning icon")
+	}
+	if !strings.Contains(html, `title="A job is already running"`) {
+		t.Error("running job trigger should keep the warning title")
 	}
 }
 
@@ -268,86 +277,46 @@ func TestEmptyState_AllNamespaces(t *testing.T) {
 	}
 }
 
-func TestTriggerConfirmModal_ContainsDialog(t *testing.T) {
-	job := k8s.CronJobDisplay{
-		Name:      "backup-job",
-		Namespace: "prod",
-		Schedule:  "0 2 * * *",
+func TestCronJobCards_InlineDialog_ContainsDialog(t *testing.T) {
+	jobs := []k8s.CronJobDisplay{
+		{Name: "backup-job", Namespace: "prod", Schedule: "0 2 * * *"},
 	}
-	html := renderToString(t, TriggerConfirmModal(job))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if !strings.Contains(html, "<dialog") {
-		t.Error("should contain dialog element")
+		t.Error("cards should contain inline dialog elements")
+	}
+	if !strings.Contains(html, `aria-labelledby="trigger-cronjob-dialog-title-0"`) {
+		t.Error("dialog should have a unique label id")
 	}
 	if !strings.Contains(html, "backup-job") {
-		t.Error("should contain job name")
+		t.Error("dialog should contain job name")
 	}
 	if !strings.Contains(html, "prod") {
-		t.Error("should contain namespace")
+		t.Error("dialog should contain namespace")
 	}
-	if !strings.Contains(html, "Trigger CronJob?") {
-		t.Error("should contain confirm heading")
+	if !strings.Contains(html, `action="/trigger/prod/backup-job"`) {
+		t.Error("dialog should contain trigger POST URL")
 	}
-	if !strings.Contains(html, "/trigger/prod/backup-job") {
-		t.Error("should contain trigger POST URL")
+	if !strings.Contains(html, `hx-post="/trigger/prod/backup-job"`) {
+		t.Error("dialog confirm form should post with HTMX")
 	}
-	if !strings.Contains(html, "Confirm") {
-		t.Error("should contain confirm button")
-	}
-	if !strings.Contains(html, "Cancel") {
-		t.Error("should contain cancel link")
+	if !strings.Contains(html, `onclick="this.closest('dialog').close()"`) {
+		t.Error("dialog actions should close via onclick")
 	}
 }
 
-func TestTriggerConfirmModal_HasFormAndLinkCancel(t *testing.T) {
-	job := k8s.CronJobDisplay{
-		Name:      "test-job",
-		Namespace: "default",
+func TestCronJobCards_InlineDialog_RunningJob_ShowsWarning(t *testing.T) {
+	jobs := []k8s.CronJobDisplay{
+		{Name: "running-job", Namespace: "default", ActiveJobs: 1},
 	}
-	html := renderToString(t, TriggerConfirmModal(job))
-
-	if !strings.Contains(html, `<form method="POST"`) {
-		t.Error("confirm should be wrapped in a form for no-JS fallback")
-	}
-	if !strings.Contains(html, `action="/trigger/default/test-job"`) {
-		t.Error("form should have action URL for no-JS fallback")
-	}
-	if !strings.Contains(html, `hx-post="/trigger/default/test-job"`) {
-		t.Error("form should have hx-post for HTMX")
-	}
-	if !strings.Contains(html, `<a href="/"`) {
-		t.Error("cancel should be a link with href for no-JS fallback")
-	}
-	if !strings.Contains(html, `onclick="event.preventDefault()`) {
-		t.Error("cancel link should prevent default for JS modal close")
-	}
-}
-
-func TestTriggerConfirmModal_RunningJob_ShowsWarning(t *testing.T) {
-	job := k8s.CronJobDisplay{
-		Name:       "running-job",
-		Namespace:  "default",
-		ActiveJobs: 1,
-	}
-	html := renderToString(t, TriggerConfirmModal(job))
+	html := renderToString(t, CronJobCards(jobs, false))
 
 	if !strings.Contains(html, "already running") {
-		t.Error("should show running warning")
+		t.Error("inline dialog should show running warning")
 	}
 	if !strings.Contains(html, "chip warn") {
 		t.Error("warning should have chip warn class")
-	}
-}
-
-func TestTriggerConfirmModal_IdleJob_NoWarning(t *testing.T) {
-	job := k8s.CronJobDisplay{
-		Name:      "idle-job",
-		Namespace: "default",
-	}
-	html := renderToString(t, TriggerConfirmModal(job))
-
-	if strings.Contains(html, "already running") {
-		t.Error("should NOT show running warning for idle job")
 	}
 }
 
@@ -453,9 +422,6 @@ func TestToast_Success(t *testing.T) {
 	}
 	if !strings.Contains(html, "setTimeout") {
 		t.Error("should contain auto-dismiss script")
-	}
-	if !strings.Contains(html, `id="modal-container"`) {
-		t.Error("should clear modal container")
 	}
 }
 

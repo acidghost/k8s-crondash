@@ -1,6 +1,12 @@
 package views
 
 templ Layout(title string) {
+	@LayoutWithNavbar(title, nil) {
+		{ children... }
+	}
+}
+
+templ LayoutWithNavbar(title string, navbarExtra templ.Component) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -15,27 +21,176 @@ templ Layout(title string) {
 			/>
 			<script src="https://unpkg.com/htmx.org@2.0.8/dist/htmx.min.js" integrity="sha256-Iig+9oy3VFkU8KiKG97cclanA9HVgMHSVSF9ClDTExM=" crossorigin="anonymous"></script>
 			<style>
-				@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
-				.status-dot { width: .5rem; height: .5rem; border-radius: 50%; display: inline-block; margin-inline-end: .4em; }
-				.status-dot--ok { background-color: var(--ok-fg); }
-				.status-dot--warn { background-color: var(--warn-fg); }
-				.status-dot--bad { background-color: var(--bad-fg); }
-				.status-dot--plain { background-color: var(--muted-fg); }
-				.status-dot--running { background-color: var(--ok-fg); animation: pulse 2s ease-in-out infinite; }
-				.cronjob-card h2 { margin: 0; font-size: 1.1rem; }
+				:root {
+					--crondash-bg: #f4f6fb;
+					--crondash-surface: #ffffff;
+					--crondash-border: #dce3ef;
+					--crondash-shadow: 0 12px 30px -20px rgba(10, 18, 36, 0.38);
+				}
+				@media (prefers-color-scheme: dark) {
+					:root {
+						--crondash-bg: #0f1420;
+						--crondash-surface: #182133;
+						--crondash-border: #2a3550;
+						--crondash-shadow: 0 18px 40px -26px rgba(0, 0, 0, 0.8);
+					}
+				}
+
+				@keyframes pulse {
+					0%,
+					100% {
+						opacity: 1;
+					}
+					50% {
+						opacity: 0.4;
+					}
+				}
+				@keyframes slideDown {
+					from {
+						opacity: 0;
+						transform: translateY(-6px);
+					}
+					to {
+						opacity: 1;
+						transform: translateY(0);
+					}
+				}
+				@keyframes zoomIn {
+					from {
+						opacity: 0;
+						transform: translate(-50%, -48%) scale(0.98);
+					}
+					to {
+						opacity: 1;
+						transform: translate(-50%, -50%) scale(1);
+					}
+				}
+
+				body {
+					min-height: 100vh;
+					background:
+						radial-gradient(
+							circle at 0% 0%,
+							rgba(87, 138, 255, 0.13),
+							transparent 42%
+						),
+						radial-gradient(
+							circle at 100% 0%,
+							rgba(12, 190, 220, 0.09),
+							transparent 34%
+						),
+						var(--crondash-bg);
+				}
+
+				.navbar {
+					backdrop-filter: blur(8px);
+					background: color-mix(in srgb, var(--crondash-bg) 84%, transparent);
+					border-block-end: 1px solid var(--crondash-border);
+					position: sticky;
+					top: 0;
+					z-index: 30;
+				}
+
+				.navbar h1 {
+					margin: 0;
+					font-size: 1.15rem;
+				}
+
+				.navbar h1 a {
+					text-decoration: none;
+					color: inherit;
+				}
+
+				main {
+					padding-bottom: 1.75rem;
+					padding-inline: 3rem;
+				}
+
+				.dashboard-page {
+					display: block;
+				}
+
+				.cronjob-card,
+				.empty-state,
+				.confirm-box {
+					background: var(--crondash-surface);
+					border: 1px solid var(--crondash-border);
+					box-shadow: var(--crondash-shadow);
+				}
+
+				.cronjob-card {
+					transition: box-shadow 0.16s ease;
+				}
+
+				.cronjob-card:hover {
+					box-shadow: 0 20px 42px -24px rgba(10, 18, 36, 0.5);
+				}
+
+				.status-dot {
+					width: 0.5rem;
+					height: 0.5rem;
+					border-radius: 50%;
+					display: inline-block;
+					margin-inline-end: 0.4em;
+				}
+				.status-dot--ok {
+					background-color: var(--ok-fg);
+				}
+				.status-dot--warn {
+					background-color: var(--warn-fg);
+				}
+				.status-dot--bad {
+					background-color: var(--bad-fg);
+				}
+				.status-dot--plain {
+					background-color: var(--muted-fg);
+				}
+				.status-dot--running {
+					background-color: var(--ok-fg);
+					animation: pulse 2s ease-in-out infinite;
+				}
+
+				.empty-state p {
+					margin-block: 0.35rem;
+				}
+
+				dialog {
+					background-color: var(--crondash-bg);
+				}
+
+				dialog::backdrop {
+					background: rgba(13, 19, 31, 0.55);
+				}
+
+				@media (max-width: 768px) {
+					main {
+						padding-inline: 1rem;
+					}
+				}
+
+				#toast-container {
+					display: grid;
+					gap: 0.4rem;
+					position: fixed;
+					bottom: 1rem;
+					right: 1rem;
+					z-index: 100;
+				}
 			</style>
 		</head>
 		<body>
-			<header>
-				<nav>
+			<header class="navbar">
+				<nav class="contents">
 					<h1><a href="/">{ title }</a></h1>
+					if navbarExtra != nil {
+						@navbarExtra
+					}
 				</nav>
 			</header>
-			<main>
+			<main class="fullbleed">
 				{ children... }
 			</main>
-			<div id="modal-container"></div>
-			<div id="toast-container" style="position:fixed;bottom:1rem;right:1rem;z-index:100"></div>
+			<div id="toast-container"></div>
 		</body>
 	</html>
 }
