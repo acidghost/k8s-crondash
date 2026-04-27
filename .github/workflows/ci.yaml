@@ -78,6 +78,7 @@ jobs:
           version: 2026.4.9
       - run: just generate
       - run: just lint
+      - run: just test
       - run: just build
       - run: just run-only --help
 
