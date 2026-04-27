@@ -31,11 +31,10 @@ func ListCronJobs(ctx context.Context, clientset kubernetes.Interface, namespace
 	var displays []CronJobDisplay
 	for _, cj := range cronJobs.Items {
 		display := CronJobDisplay{
-			Name:       cj.Name,
-			Namespace:  cj.Namespace,
-			Schedule:   cj.Spec.Schedule,
-			Suspended:  cj.Spec.Suspend != nil && *cj.Spec.Suspend,
-			ActiveJobs: len(cj.Status.Active),
+			Name:      cj.Name,
+			Namespace: cj.Namespace,
+			Schedule:  cj.Spec.Schedule,
+			Suspended: cj.Spec.Suspend != nil && *cj.Spec.Suspend,
 		}
 
 		jobs, err := listChildJobs(ctx, clientset, cj.Namespace, cj.Name, jobHistoryLimit)
@@ -43,6 +42,10 @@ func ListCronJobs(ctx context.Context, clientset kubernetes.Interface, namespace
 			slog.Warn("failed to list child jobs", "namespace", cj.Namespace, "cronjob", cj.Name, "error", err)
 		} else {
 			processJobs(jobs, &display)
+		}
+
+		if len(cj.Status.Active) > display.ActiveJobs {
+			display.ActiveJobs = len(cj.Status.Active)
 		}
 
 		displays = append(displays, display)
