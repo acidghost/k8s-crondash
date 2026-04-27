@@ -13,6 +13,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  # renovate: datasource=github-releases depName=jdx/mise
+  MISE_VERSION: 2026.4.9
+
 jobs:
   publish-chart:
     name: Publish Chart
@@ -27,7 +31,7 @@ jobs:
 
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
-          version: 2026.4.9
+          version: ${{ env.MISE_VERSION }}
 
       - name: Log in to registry
         run: helm registry login "${INPUTS_REGISTRY}" --username "${GITHUB_ACTOR}" --password "$GITHUB_TOKEN"

@@ -13,6 +13,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  # renovate: datasource=github-releases depName=jdx/mise
+  MISE_VERSION: 2026.4.9
+
 jobs:
   changes:
     name: Changes
@@ -86,7 +90,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
-          version: 2026.4.9
+          version: ${{ env.MISE_VERSION }}
       - run: just actions-lint
 
   go:
@@ -105,7 +109,7 @@ jobs:
           go-version-file: go.mod
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
-          version: 2026.4.9
+          version: ${{ env.MISE_VERSION }}
       - run: just generate
       - run: just lint
       - run: just test
@@ -125,7 +129,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
-          version: 2026.4.9
+          version: ${{ env.MISE_VERSION }}
       - run: just helm-lint
       - run: just helm-conform
 

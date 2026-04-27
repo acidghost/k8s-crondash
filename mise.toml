@@ -1,3 +1,6 @@
+[settings]
+install_before = "7d"
+
 [tools]
 actionlint = "1.7.12"
 golangci-lint = "2.11.4"
