@@ -2,22 +2,17 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/acidghost/k8s-crondash/internal/config"
-	"github.com/acidghost/k8s-crondash/internal/handlers"
 	"github.com/acidghost/k8s-crondash/internal/k8s"
+	"github.com/acidghost/k8s-crondash/internal/server"
 	"github.com/acidghost/k8s-crondash/internal/state"
 	"github.com/gofiber/fiber/v3"
-	"github.com/gofiber/fiber/v3/middleware/basicauth"
-	"github.com/gofiber/fiber/v3/middleware/logger"
 )
 
 var (
@@ -25,8 +20,6 @@ var (
 	buildCommit  string
 	buildDate    string
 )
-
-var _ handlers.CronJobService = (*state.Store)(nil)
 
 func main() {
 	slog.Info("starting k8s-crondash",
@@ -41,10 +34,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	app := fiber.New(fiber.Config{
-		AppName: "k8s-crondash",
-	})
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -55,35 +44,8 @@ func main() {
 	}
 
 	store := state.NewStore(ctx, clientset, cfg.Namespace, time.Duration(cfg.RefreshInterval)*time.Second, cfg.JobHistoryLimit)
-
-	app.Use(logger.New())
-
-	app.Get("/healthz", func(c fiber.Ctx) error {
-		return c.SendStatus(http.StatusOK)
-	})
-
-	app.Get("/readyz", func(c fiber.Ctx) error {
-		if store.IsReady() {
-			return c.SendStatus(http.StatusOK)
-		}
-		return c.SendStatus(http.StatusServiceUnavailable)
-	})
-
-	app.Use(basicauth.New(basicauth.Config{
-		Users: map[string]string{
-			cfg.AuthUsername: sha256PasswordHash(cfg.AuthPassword),
-		},
-	}))
-
+	app := server.New(cfg, store)
 	cfg.AuthPassword = ""
-
-	dashboardHandler := handlers.NewDashboardHandler(store, cfg.RefreshInterval, cfg.Namespace == "", cfg.Namespace)
-	app.Get("/", dashboardHandler.Index)
-	app.Get("/cronjobs", dashboardHandler.CronJobs)
-
-	triggerHandler := handlers.NewTriggerHandler(store)
-	app.Get("/trigger-confirm/:ns/:name", triggerHandler.ConfirmModal)
-	app.Post("/trigger/:ns/:name", triggerHandler.Trigger)
 
 	slog.Info("listening", "addr", cfg.ListenAddr)
 
@@ -95,9 +57,4 @@ func main() {
 	}
 
 	slog.Info("server stopped")
-}
-
-func sha256PasswordHash(password string) string {
-	h := sha256.Sum256([]byte(password))
-	return "{SHA256}" + base64.StdEncoding.EncodeToString(h[:])
 }
