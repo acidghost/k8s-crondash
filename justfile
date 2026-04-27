@@ -42,8 +42,9 @@ run *args: build (run-only args)
 run-only *args:
     ./build/{{program}}-{{goos}}-{{goarch}} {{args}}
 
-build-image:
+build-image platform=goarch:
     {{container_engine}} build \
+        --platform linux/{{platform}} \
         --build-arg "BUILD_VERSION={{version}}" \
         --build-arg "BUILD_COMMIT={{commit_sha}}" \
         -t {{container_image}} .
