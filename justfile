@@ -76,7 +76,7 @@ lint:
     golangci-lint run
 
 test:
-    go test ./...
+    go test -race -coverprofile=coverage.txt ./...
 
 install: build
     cp -v './build/{{program}}-{{goos}}-{{goarch}}' "$(go env GOBIN)/{{program}}"

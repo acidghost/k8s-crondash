@@ -2,13 +2,17 @@ package k8s
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestListCronJobs_Empty(t *testing.T) {
@@ -260,6 +264,77 @@ func TestListCronJobs_UsesStatusCountersWhenConditionsMissing(t *testing.T) {
 	}
 }
 
+func TestListCronJobs_ListError(t *testing.T) {
+	clientset := fake.NewClientset()
+	clientset.PrependReactor("list", "cronjobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+
+	_, err := ListCronJobs(context.Background(), clientset, "default", 5)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "list cronjobs: boom") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListCronJobs_DoesNotDoubleCountActiveJobs(t *testing.T) {
+	suspend := false
+	clientset := fake.NewClientset()
+
+	now := metav1.NewTime(time.Now())
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+		},
+		Status: batchv1.CronJobStatus{
+			Active: []corev1.ObjectReference{{
+				Name:      "test-cj-running",
+				Namespace: "default",
+			}},
+		},
+	}
+	_, err := clientset.BatchV1().CronJobs("default").Create(context.Background(), cj, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create cronjob: %v", err)
+	}
+
+	runningJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj-running",
+			Namespace: "default",
+			Labels: map[string]string{
+				"batch.kubernetes.io/cronjob": "test-cj",
+			},
+		},
+		Status: batchv1.JobStatus{
+			Active:    1,
+			StartTime: &now,
+		},
+	}
+	_, err = clientset.BatchV1().Jobs("default").Create(context.Background(), runningJob, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create running job: %v", err)
+	}
+
+	cronJobs, err := ListCronJobs(context.Background(), clientset, "default", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cronJobs) != 1 {
+		t.Fatalf("expected 1 cronjob, got %d", len(cronJobs))
+	}
+	if cronJobs[0].ActiveJobs != 1 {
+		t.Fatalf("expected 1 active job, got %d", cronJobs[0].ActiveJobs)
+	}
+}
+
 func TestTriggerCronJob_Success(t *testing.T) {
 	suspend := false
 	clientset := fake.NewClientset()
@@ -416,6 +491,104 @@ func TestTriggerCronJob_NotFound(t *testing.T) {
 	err := TriggerCronJob(context.Background(), clientset, "default", "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent cronjob")
+	}
+}
+
+func TestTriggerCronJob_ListJobsError(t *testing.T) {
+	suspend := false
+	clientset := fake.NewClientset()
+
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{Template: setupPodTemplate()},
+			},
+		},
+	}
+	_, err := clientset.BatchV1().CronJobs("default").Create(context.Background(), cj, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create cronjob: %v", err)
+	}
+
+	clientset.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+
+	err = TriggerCronJob(context.Background(), clientset, "default", "test-cj")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "check active jobs for default/test-cj: list jobs for cronjob default/test-cj: boom") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTriggerCronJob_CreateJobError(t *testing.T) {
+	suspend := false
+	clientset := fake.NewClientset()
+
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cj",
+			Namespace: "default",
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &suspend,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{Template: setupPodTemplate()},
+			},
+		},
+	}
+	_, err := clientset.BatchV1().CronJobs("default").Create(context.Background(), cj, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create cronjob: %v", err)
+	}
+
+	clientset.PrependReactor("create", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+
+	err = TriggerCronJob(context.Background(), clientset, "default", "test-cj")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "create job for cronjob default/test-cj: boom") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompletionOrCreationTime_FallsBackToStartTime(t *testing.T) {
+	start := metav1.NewTime(time.Date(2025, 3, 1, 9, 0, 0, 0, time.UTC))
+	job := batchv1.Job{
+		Status: batchv1.JobStatus{
+			StartTime: &start,
+		},
+	}
+
+	got := completionOrCreationTime(job)
+	if !got.Equal(start.Time) {
+		t.Fatalf("expected %v, got %v", start.Time, got)
+	}
+}
+
+func TestCompletionOrCreationTime_FallsBackToCreationTimestamp(t *testing.T) {
+	created := metav1.NewTime(time.Date(2025, 3, 1, 8, 0, 0, 0, time.UTC))
+	job := batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			CreationTimestamp: created,
+		},
+	}
+
+	got := completionOrCreationTime(job)
+	if !got.Equal(created.Time) {
+		t.Fatalf("expected %v, got %v", created.Time, got)
 	}
 }
 
