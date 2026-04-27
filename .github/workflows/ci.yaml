@@ -21,6 +21,7 @@ jobs:
       contents: read
       pull-requests: read # needed by paths-filter
     outputs:
+      gha: ${{ steps.outputs.outputs.gha }}
       go: ${{ steps.outputs.outputs.go }}
       helm: ${{ steps.outputs.outputs.helm }}
     steps:
@@ -32,7 +33,12 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           filters: |
+            gha:
+              - '.github/workflows/*.yaml'
+              - 'justfile'
+              - 'mise.toml'
             go:
+              - '.github/workflows/ci.yaml'
               - '**/*.go'
               - '**/*.templ'
               - 'go.mod'
@@ -42,6 +48,7 @@ jobs:
               - 'justfile'
               - 'mise.toml'
             helm:
+              - '.github/workflows/ci.yaml'
               - 'deploy/**'
               - 'justfile'
               - 'mise.toml'
@@ -49,15 +56,38 @@ jobs:
         id: outputs
         run: |
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            echo "go=true" >> "$GITHUB_OUTPUT"
-            echo "helm=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "gha=true"
+              echo "go=true"
+              echo "helm=true"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "go=${FILTER_GO}" >> "$GITHUB_OUTPUT"
-            echo "helm=${FILTER_HELM}" >> "$GITHUB_OUTPUT"
+            {
+              echo "gha=${FILTER_GHA}" 
+              echo "go=${FILTER_GO}"
+              echo "helm=${FILTER_HELM}"
+            } >> "$GITHUB_OUTPUT"
           fi
         env:
+          FILTER_GHA: ${{ steps.filter.outputs.gha }}
           FILTER_GO: ${{ steps.filter.outputs.go }}
           FILTER_HELM: ${{ steps.filter.outputs.helm }}
+
+  gha:
+    name: GHA
+    needs: changes
+    if: needs.changes.outputs.gha == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
+        with:
+          version: 2026.4.9
+      - run: just actions-lint
 
   go:
     name: Go
@@ -101,13 +131,16 @@ jobs:
 
   ci-passed:
     name: CI Passed
-    needs: [go, helm]
+    needs: [gha, go, helm]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
     env:
+      GHA_RESULT: ${{ needs.gha.result }}
       GO_RESULT: ${{ needs.go.result }}
       HELM_RESULT: ${{ needs.helm.result }}
     steps:
       - run: |
-          [[ "${GO_RESULT}" != "failure" ]] && [[ "${HELM_RESULT}" != "failure" ]]
+          [[ "${GHA_RESULT}" != "failure" ]] && \
+          [[ "${GO_RESULT}" != "failure" ]] && \
+          [[ "${HELM_RESULT}" != "failure" ]]

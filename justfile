@@ -65,6 +65,9 @@ helm-package:
 helm-push: helm-package
     helm push build/{{program}}-0.0.0.tgz oci://{{container_registry}}/acidghost/charts
 
+actions-lint *args:
+    actionlint -verbose {{args}}
+
 vendor:
     go mod tidy
     go mod vendor
