@@ -3,7 +3,7 @@ install_before = "7d"
 
 [tools]
 actionlint = "1.7.12"
-golangci-lint = "2.12.1"
+golangci-lint = "2.12.2"
 helm = "4.1.4"
 just = "1.50.0"
 kubeconform = "0.7.0"
