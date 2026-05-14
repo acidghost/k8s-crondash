@@ -2,7 +2,7 @@ module github.com/acidghost/k8s-crondash
 
 go 1.26.0
 
-toolchain go1.26.2
+toolchain go1.26.3
 
 require (
 	github.com/a-h/templ v0.3.1001
