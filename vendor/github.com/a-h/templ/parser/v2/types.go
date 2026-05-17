@@ -890,6 +890,7 @@ func (bca *BoolConstantAttribute) Copy() Attribute {
 type ConstantAttribute struct {
 	Key         AttributeKey
 	Value       string
+	ValueRange  Range
 	SingleQuote bool
 	Range       Range
 }
@@ -913,6 +914,7 @@ func (ca *ConstantAttribute) Visit(v Visitor) error {
 func (ca *ConstantAttribute) Copy() Attribute {
 	return &ConstantAttribute{
 		Value:       ca.Value,
+		ValueRange:  ca.ValueRange,
 		SingleQuote: ca.SingleQuote,
 		Key:         ca.Key,
 		Range:       ca.Range,
@@ -948,8 +950,10 @@ func (bea *BoolExpressionAttribute) Copy() Attribute {
 
 // href={ ... }
 type ExpressionAttribute struct {
-	Key        AttributeKey
-	Expression Expression
+	Key                 AttributeKey
+	Expression          Expression
+	AttributeStartRange Range
+	Range               Range
 }
 
 func (ea *ExpressionAttribute) String() string {
@@ -1010,8 +1014,10 @@ func (ea *ExpressionAttribute) Visit(v Visitor) error {
 
 func (ea *ExpressionAttribute) Copy() Attribute {
 	return &ExpressionAttribute{
-		Expression: ea.Expression,
-		Key:        ea.Key,
+		Expression:          ea.Expression,
+		Key:                 ea.Key,
+		AttributeStartRange: ea.AttributeStartRange,
+		Range:               ea.Range,
 	}
 }
 
@@ -1433,6 +1439,7 @@ type GoCode struct {
 	// TrailingSpace lists what happens after the expression.
 	TrailingSpace TrailingSpace
 	Multiline     bool
+	Range         Range
 }
 
 func (gc *GoCode) Trailing() TrailingSpace {
@@ -1471,6 +1478,7 @@ type StringExpression struct {
 	Expression Expression
 	// TrailingSpace lists what happens after the expression.
 	TrailingSpace TrailingSpace
+	Range         Range
 }
 
 func (se *StringExpression) Trailing() TrailingSpace {
