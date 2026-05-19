@@ -10,7 +10,7 @@ require (
 	github.com/gofiber/fiber/v3 v3.2.0
 	k8s.io/api v0.36.1
 	k8s.io/apimachinery v0.36.1
-	k8s.io/client-go v0.36.0
+	k8s.io/client-go v0.36.1
 )
 
 require (
