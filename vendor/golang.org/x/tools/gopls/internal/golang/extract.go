@@ -54,7 +54,7 @@ func extractVariable(pkg *cache.Package, pgf *parsego.File, start, end token.Pos
 		info = pkg.TypesInfo()
 		file = pgf.File
 	)
-	curExprs, err := canExtractVariable(info, pgf.Cursor, start, end, all)
+	curExprs, err := canExtractVariable(info, pgf.Cursor(), start, end, all)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot extract: %v", err)
 	}
@@ -133,7 +133,7 @@ Outer:
 			}
 			child = p
 		}
-		visible, _ = pgf.Cursor.FindByPos(child.Pos(), child.End())
+		visible, _ = pgf.Cursor().FindByPos(child.Pos(), child.End())
 	}
 	variables, err := collectFreeVars(info, file, expr0.Pos(), expr0.End(), expr0)
 	if err != nil {
@@ -303,7 +303,7 @@ func stmtToInsertVarBefore(cur inspector.Cursor, variables []*variable) (token.P
 				break
 			}
 		}
-		if !astutil.CursorValid(curStmt) {
+		if !curStmt.Valid() {
 			return 0, fmt.Errorf("no enclosing statement")
 		}
 		cur = curStmt
@@ -326,7 +326,7 @@ func stmtToInsertVarBefore(cur inspector.Cursor, variables []*variable) (token.P
 	// baseIfStmt walks up the if/else-if chain until we get to
 	// the top of the current if chain.
 	baseIfStmt := func(curIf inspector.Cursor) (token.Pos, error) {
-		for astutil.IsChildOf(curIf, edge.IfStmt_Else) {
+		for curIf.ParentEdgeKind() == edge.IfStmt_Else {
 			curIf = curIf.Parent()
 			if hasFreeVar(curIf.Node().(*ast.IfStmt).Init) {
 				return 0, fmt.Errorf("else-if's init has free variable")
@@ -483,7 +483,7 @@ func canExtractVariable(info *types.Info, curFile inspector.Cursor, start, end t
 	//   x := *newVar + 1
 	//   *newVar = 2
 	for _, curExpr := range curExprs {
-		switch ek, _ := curExpr.ParentEdge(); ek {
+		switch curExpr.ParentEdgeKind() {
 		case edge.AssignStmt_Lhs:
 			return nil, fmt.Errorf("node %T is in LHS of an AssignStmt", expr)
 		case edge.ValueSpec_Names:
@@ -589,7 +589,7 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 		errorPrefix = "extractMethod"
 	}
 
-	p, ok, methodOk, err := canExtractFunction(pgf.Cursor, start, end)
+	p, ok, methodOk, err := canExtractFunction(pgf.Cursor(), start, end)
 	if (!ok && !isMethod) || (!methodOk && isMethod) {
 		return nil, nil, fmt.Errorf("%s: cannot extract %s: %v", errorPrefix,
 			safetoken.StartPosition(fset, start), err)
@@ -598,8 +598,20 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 
 	// Narrow (start, end) to the located nodes.
 	start, end = curStart.Node().Pos(), curEnd.Node().End()
-
 	outer := curFuncDecl.Node().(*ast.FuncDecl)
+
+	// Labeled statements have un-intuitive ranges.
+	// Technically they end at the end of the statement
+	// that they label, but user expectation is that the label
+	// is a pseudo-statement by itself. This is especially confusing when
+	// the statement that's labeled is a multi-line block statement.
+	//
+	// If the end cursor is the identifier in a labeled statement,
+	// we expand the range to include the colon.
+	// That way, we include the label, but not the statement being labeled
+	if curEnd.ParentEdgeKind() == edge.LabeledStmt_Label {
+		end = curEnd.Parent().Node().(*ast.LabeledStmt).Colon + 1
+	}
 
 	// A return statement is non-nested if its parent node is equal to the parent node
 	// of the first node in the selection. These cases must be handled separately because
@@ -913,7 +925,7 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 	// statement is declared outside of the extracted block. These will be
 	// handled below, after adjusting return statements and generating return
 	// info.
-	curSel, _ := pgf.Cursor.FindByPos(start, end) // since canExtractFunction succeeded, this will always return a valid cursor
+	curSel, _ := pgf.Cursor().FindByPos(start, end) // since canExtractFunction succeeded, this will always return a valid cursor
 	freeBranches := freeBranches(info, curSel, start, end)
 
 	// All return statements in the extracted block are error handling returns, and there are no free control statements.
@@ -985,27 +997,18 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 			Value: "0",
 		}
 		var branchStmts []*ast.BranchStmt
-		var stack []ast.Node
 		// Add the zero "ctrl" value to each return statement in the extracted block.
-		ast.Inspect(extractedBlock, func(n ast.Node) bool {
-			if n != nil {
-				stack = append(stack, n)
-			} else {
-				stack = stack[:len(stack)-1]
-			}
+		ast.PreorderStack(extractedBlock, nil, func(n ast.Node, stack []ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.ReturnStmt:
 				n.Results = append(n.Results, zeroValExpr)
 			case *ast.BranchStmt:
 				// Collect a list of branch statements in the extracted block to examine later.
-				if isFreeBranchStmt(stack) {
+				if isFreeBranchStmt(append(stack, n), extractedBlock) {
 					branchStmts = append(branchStmts, n)
 				}
 			case *ast.FuncLit:
-				// Don't descend into nested functions. When we return false
-				// here, ast.Inspect does not give us a "pop" event when leaving
-				// the subtree, so we need to pop here. (golang/go#73319)
-				stack = stack[:len(stack)-1]
+				// Don't descend into nested functions.
 				return false
 			}
 			return true
@@ -1039,7 +1042,6 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 					Value: strconv.Itoa(i + 1), // start with 1 because 0 is reserved for base case
 				}),
 			})
-
 		}
 		retVars = append(retVars, &returnVariable{
 			name:    ast.NewIdent(ctrlVar),
@@ -1097,10 +1099,12 @@ func extractFunctionMethod(cpkg *cache.Package, pgf *parsego.File, start, end to
 	}
 	if ifReturn != nil {
 		if isErrHandlingReturnsCase {
-			errName := retVars[len(retVars)-1]
-			fmt.Fprintf(&ifBuf, "if %s != nil ", errName.name.String())
-			if err := format.Node(&ifBuf, fset, ifReturn.Body); err != nil {
-				return nil, nil, err
+			if len(retVars) > 0 {
+				errName := retVars[len(retVars)-1]
+				fmt.Fprintf(&ifBuf, "if %s != nil ", errName.name.String())
+				if err := format.Node(&ifBuf, fset, ifReturn.Body); err != nil {
+					return nil, nil, err
+				}
 			}
 		} else {
 			if err := format.Node(&ifBuf, fset, ifReturn); err != nil {
@@ -1977,18 +1981,27 @@ nextBranch:
 }
 
 // isFreeBranchStmt returns true if the relevant ancestor for the branch
-// statement at stack[len(stack)-1] cannot be found in the stack. This is used
-// when we are examining the extracted block, since type information isn't
-// available. We need to find the location of the label without using
-// types.Info.
-func isFreeBranchStmt(stack []ast.Node) bool {
+// statement at stack[len(stack)-1] cannot be found in the stack (for
+// break/continue) or the extracted block (for goto). This is used when we are
+// examining the extracted block, since type information isn't available. We
+// need to find the location of the label without using types.Info.
+// We treat goto and break/continue separately because while break/continue
+// must be used within a for, range, switch, or select, goto's use is
+// less restrictive within a function body.
+func isFreeBranchStmt(stack []ast.Node, extractedBlock *ast.BlockStmt) bool {
 	switch node := stack[len(stack)-1].(type) {
 	case *ast.BranchStmt:
 		isLabeled := node.Label != nil
 		switch node.Tok {
 		case token.GOTO:
 			if isLabeled {
-				return !enclosingLabel(stack, node.Label.Name)
+				for _, stmt := range extractedBlock.List {
+					if l, ok := stmt.(*ast.LabeledStmt); ok && l.Label != nil && l.Label.Name == node.Label.Name {
+						// We found the label in the extracted block, so it's not a free branch stmt.
+						return false
+					}
+				}
+				return true
 			}
 		case token.BREAK, token.CONTINUE:
 			// Find innermost relevant ancestor for break/continue.
@@ -2009,14 +2022,4 @@ func isFreeBranchStmt(stack []ast.Node) bool {
 	}
 	// We didn't find the relevant ancestor on the path, so this must be a free branch statement.
 	return true
-}
-
-// enclosingLabel returns true if the given label is found on the stack.
-func enclosingLabel(stack []ast.Node, label string) bool {
-	for _, n := range stack {
-		if labelStmt, ok := n.(*ast.LabeledStmt); ok && labelStmt.Label.Name == label {
-			return true
-		}
-	}
-	return false
 }

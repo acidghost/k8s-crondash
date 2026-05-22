@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/gopls/internal/cache/metadata"
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/filecache"
@@ -343,7 +344,11 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 			}
 
 			maybeReport(completed.Add(1))
-			an.summary = summary
+			// Copy fields onto the node. The summary itself (which may
+			// be shared via filecache or inFlightAnalyses) is not
+			// retained, so it is never mutated.
+			an.compiles = summary.Compiles
+			an.actions = summary.Actions
 
 			// Notify each waiting predecessor,
 			// and enqueue it when it becomes a leaf.
@@ -370,15 +375,10 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 		return nil, err // cancelled, or failed to produce a package
 	}
 
-	// Inv: all root nodes now have a summary (#66732).
-	//
-	// We know this is falsified empirically. This means either
-	// the summary was "successfully" set to nil (above), or there
-	// is a problem with the graph such the enqueuing leaves does
-	// not lead to completion of roots (or an error).
+	// Inv: all root nodes now have a summary.
 	for _, root := range roots {
-		if root.summary == nil {
-			bug.Report("root analysisNode has nil summary")
+		if root.actions == nil {
+			panic("root analysisNode has nil actions")
 		}
 	}
 
@@ -404,7 +404,7 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 				// cause #60909 since none of the analyzers currently added for
 				// requirements (e.g. ctrlflow, inspect, buildssa)
 				// is capable of reporting diagnostics.
-				if summary := root.summary.Actions[stableNames[a]]; summary != nil {
+				if summary := root.actions[stableNames[a]]; summary != nil {
 					if n := len(summary.Diagnostics); n > 0 {
 						bug.Reportf("Internal error: got %d unexpected diagnostics from analyzer %s. This analyzer was added only to fulfil the requirements of the requested set of analyzers, and it is not expected that such analyzers report diagnostics. Please report this in issue #60909.", n, a)
 					}
@@ -412,12 +412,11 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 				continue
 			}
 
-			// Inv: root.summary is the successful result of run (via runCached).
-			// TODO(adonovan): fix: root.summary is sometimes nil! (#66732).
-			summary, ok := root.summary.Actions[stableNames[a]]
+			// Inv: root.actions is the successful result of run (via runCached).
+			summary, ok := root.actions[stableNames[a]]
 			if summary == nil {
 				panic(fmt.Sprintf("analyzeSummary.Actions[%q] = (nil, %t); got %v (#60551)",
-					stableNames[a], ok, root.summary.Actions))
+					stableNames[a], ok, root.actions))
 			}
 			if summary.Err != "" {
 				continue // action failed
@@ -432,7 +431,7 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 
 func (an *analysisNode) decrefPreds() {
 	if an.unfinishedPreds.Add(-1) == 0 {
-		an.summary.Actions = nil
+		an.actions = nil
 	}
 }
 
@@ -459,8 +458,9 @@ type analysisNode struct {
 	preds           []*analysisNode             // graph edges:
 	succs           map[PackageID]*analysisNode //   (preds -> self -> succs)
 	unfinishedSuccs atomic.Int32
-	unfinishedPreds atomic.Int32                  // effectively a summary.Actions refcount
-	summary         *analyzeSummary               // serializable result of analyzing this package
+	unfinishedPreds atomic.Int32                  // effectively an actions refcount
+	compiles        bool                          // copied from analyzeSummary
+	actions         actionMap                     // copied from analyzeSummary; nilled by decrefPreds
 	stableNames     map[*analysis.Analyzer]string // cross-process stable names for Analyzers
 
 	summaryHashOnce sync.Once
@@ -478,10 +478,10 @@ func (an *analysisNode) summaryHash() file.Hash {
 	an.summaryHashOnce.Do(func() {
 		hasher := sha256.New()
 		fmt.Fprintf(hasher, "dep: %s\n", an.ph.mp.PkgPath)
-		fmt.Fprintf(hasher, "compiles: %t\n", an.summary.Compiles)
+		fmt.Fprintf(hasher, "compiles: %t\n", an.compiles)
 
 		// action results: errors and facts
-		for name, summary := range moremaps.Sorted(an.summary.Actions) {
+		for name, summary := range moremaps.Sorted(an.actions) {
 			fmt.Fprintf(hasher, "action %s\n", name)
 			if summary.Err != "" {
 				fmt.Fprintf(hasher, "error %s\n", summary.Err)
@@ -580,52 +580,36 @@ func (an *analysisNode) runCached(ctx context.Context, key file.Hash) (*analyzeS
 	// We now consult a global cache of promised results. If nothing material has
 	// changed, we'll make a hit in the shared cache.
 
-	// Access the cache.
-	var summary *analyzeSummary
+	// Access the cache. The returned summary is shared (via memCache or
+	// inFlightAnalyses) and must be treated as immutable; the caller
+	// copies its fields onto the analysisNode rather than retaining it.
 	const cacheKind = "analysis"
-	if data, err := filecache.Get(cacheKind, key); err == nil {
-		// cache hit
-		analyzeSummaryCodec.Decode(data, &summary)
-		if summary == nil { // debugging #66732
-			bug.Reportf("analyzeSummaryCodec.Decode yielded nil *analyzeSummary")
-		}
+	if summary, err := filecache.Get(cacheKind, key, analyzeSummaryCodec.Decode); err == nil {
+		return summary, nil // cache hit
 	} else if err != filecache.ErrNotFound {
 		return nil, bug.Errorf("internal error reading shared cache: %v", err)
-	} else {
-		// Cache miss: do the work.
-		cachedSummary, err := inFlightAnalyses.get(ctx, key, func(ctx context.Context) (*analyzeSummary, error) {
-			summary, err := an.run(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if summary == nil { // debugging #66732 (can't happen)
-				bug.Reportf("analyzeNode.run returned nil *analyzeSummary")
-			}
-			go func() {
-				cacheLimit <- unit{}            // acquire token
-				defer func() { <-cacheLimit }() // release token
+	}
 
-				data := analyzeSummaryCodec.Encode(summary)
-				if false {
-					log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.ph.mp.ID)
-				}
-				if err := filecache.Set(cacheKind, key, data); err != nil {
-					event.Error(ctx, "internal error updating analysis shared cache", err)
-				}
-			}()
-			return summary, nil
-		})
+	// Cache miss: do the work.
+	return inFlightAnalyses.get(ctx, key, func(ctx context.Context) (*analyzeSummary, error) {
+		summary, err := an.run(ctx)
 		if err != nil {
 			return nil, err
 		}
+		go func() {
+			cacheLimit <- unit{}            // acquire token
+			defer func() { <-cacheLimit }() // release token
 
-		// Copy the computed summary. In decrefPreds, we may zero out
-		// summary.actions, but can't mutate a shared result.
-		copy := *cachedSummary
-		summary = &copy
-	}
-
-	return summary, nil
+			data := analyzeSummaryCodec.Encode(summary)
+			if false {
+				log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.ph.mp.ID)
+			}
+			if err := filecache.Set(cacheKind, key, data); err != nil {
+				event.Error(ctx, "internal error updating analysis shared cache", err)
+			}
+		}()
+		return summary, nil
+	})
 }
 
 // cacheKey returns a cache key that is a cryptographic digest
@@ -782,7 +766,7 @@ filterErrors:
 	}
 
 	for _, vdep := range an.succs {
-		if !vdep.summary.Compiles {
+		if !vdep.compiles {
 			compiles = false // transitive error
 		}
 	}
@@ -929,7 +913,7 @@ func (act *action) exec(ctx context.Context) (any, *actionSummary, error) {
 	if hasFacts {
 		// TODO(adonovan): use deterministic order.
 		for _, vdep := range act.vdeps {
-			if summ := vdep.summary.Actions[act.stableName]; summ.Err != "" {
+			if summ := vdep.actions[act.stableName]; summ.Err != "" {
 				return nil, nil, errors.New(summ.Err)
 			}
 		}
@@ -1003,7 +987,7 @@ func (act *action) exec(ctx context.Context) (any, *actionSummary, error) {
 			return nil, bug.Errorf("internal error in %s: missing vdep for id=%s", apkg.pkg.Types().Path(), id)
 		}
 
-		return vdep.summary.Actions[act.stableName].Facts, nil
+		return vdep.actions[act.stableName].Facts, nil
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("internal error decoding analysis facts: %w", err)
@@ -1029,6 +1013,7 @@ func (act *action) exec(ctx context.Context) (any, *actionSummary, error) {
 		TypesInfo:    apkg.pkg.TypesInfo(),
 		TypesSizes:   apkg.pkg.TypesSizes(),
 		TypeErrors:   apkg.typeErrors,
+		Module:       analysisModuleFromPackagesModule(apkg.pkg.metadata.Module),
 		ResultOf:     inputs,
 		Report: func(d analysis.Diagnostic) {
 			// Assert that SuggestedFixes are well formed.
@@ -1447,4 +1432,31 @@ func stableName(a *analysis.Analyzer) string {
 	// it is unique, but making them always differ helps avoid
 	// name/stablename confusion.
 	return fmt.Sprintf("%s(%s:%d)", a.Name, filepath.Base(file), line)
+}
+
+// analysisModuleFromPackagesModule converts a packages.Module to an analysis.Module.
+func analysisModuleFromPackagesModule(mod *packages.Module) *analysis.Module {
+	if mod == nil {
+		return nil
+	}
+
+	var modErr *analysis.ModuleError
+	if mod.Error != nil {
+		modErr = &analysis.ModuleError{
+			Err: mod.Error.Err,
+		}
+	}
+
+	return &analysis.Module{
+		Path:      mod.Path,
+		Version:   mod.Version,
+		Replace:   analysisModuleFromPackagesModule(mod.Replace),
+		Time:      mod.Time,
+		Main:      mod.Main,
+		Indirect:  mod.Indirect,
+		Dir:       mod.Dir,
+		GoMod:     mod.GoMod,
+		GoVersion: mod.GoVersion,
+		Error:     modErr,
+	}
 }

@@ -63,6 +63,9 @@ type Application struct {
 	// VeryVerbose enables a higher level of verbosity in logging output.
 	VeryVerbose bool `flag:"vv,veryverbose" help:"very verbose output"`
 
+	// OTel specifies the OpenTelemetry collector endpoint (e.g. http://localhost:4318).
+	OTel string `flag:"otel" help:"export telemetry to specified OpenTelemetry collector address (e.g. http://localhost:4318)"`
+
 	// PrepareOptions is called to update the options when a new view is built.
 	// It is primarily to allow the behavior of gopls to be modified by hooks.
 	PrepareOptions func(*settings.Options)
@@ -233,7 +236,7 @@ func (app *Application) Run(ctx context.Context, args ...string) error {
 	// executable, and immediately runs a gc.
 	filecache.Start()
 
-	ctx = debug.WithInstance(ctx)
+	ctx = debug.WithInstance(ctx, app.OTel)
 	if len(args) == 0 {
 		s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
 		return tool.Run(ctx, s, &app.Serve, args)
@@ -359,8 +362,8 @@ func initParams(rootDir string, opts *settings.Options) *protocol.ParamInitializ
 	params.Capabilities.TextDocument.SemanticTokens.Requests.Range = &protocol.Or_ClientSemanticTokensRequestOptions_range{Value: true}
 	// params.Capabilities.TextDocument.SemanticTokens.Requests.Range.Value = true
 	params.Capabilities.TextDocument.SemanticTokens.Requests.Full = &protocol.Or_ClientSemanticTokensRequestOptions_full{Value: true}
-	params.Capabilities.TextDocument.SemanticTokens.TokenTypes = moreslices.ConvertStrings[string](semtok.TokenTypes)
-	params.Capabilities.TextDocument.SemanticTokens.TokenModifiers = moreslices.ConvertStrings[string](semtok.TokenModifiers)
+	params.Capabilities.TextDocument.SemanticTokens.TokenTypes = moreslices.ConvertStrings[string](semtok.Types)
+	params.Capabilities.TextDocument.SemanticTokens.TokenModifiers = moreslices.ConvertStrings[string](semtok.Modifiers)
 	params.Capabilities.TextDocument.CodeAction = protocol.CodeActionClientCapabilities{
 		CodeActionLiteralSupport: protocol.ClientCodeActionLiteralOptions{
 			CodeActionKind: protocol.ClientCodeActionKindOptions{

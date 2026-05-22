@@ -48,15 +48,14 @@ import (
 	"go/types"
 	"hash/crc32"
 	"slices"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/tools/go/types/objectpath"
 	"golang.org/x/tools/gopls/internal/cache/metadata"
-	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/fingerprint"
 	"golang.org/x/tools/gopls/internal/util/frob"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
-	"golang.org/x/tools/internal/typesinternal"
 )
 
 // An Index records the non-empty method sets of all package-level
@@ -65,13 +64,21 @@ import (
 type Index struct {
 	pkg     gobPackage
 	PkgPath metadata.PackagePath
+
+	// byObjectPath maps the object path of each method declared in
+	// this package to its position, for use by [Index.LocationOf].
+	// It is derived from pkg (no external data needed) and built
+	// lazily on the first LocationOf call, since few packages are
+	// ever the target of a cross-package lookup but a single package
+	// may be queried many times (and may have a very large method
+	// set, so a linear scan per call would be costly).
+	byObjectPathOnce sync.Once
+	byObjectPath     map[string]gobPosition
 }
 
 // Decode decodes the given gob-encoded data as an Index.
 func Decode(pkgpath metadata.PackagePath, data []byte) *Index {
-	var pkg gobPackage
-	packageCodec.Decode(data, &pkg)
-	return &Index{pkg: pkg, PkgPath: pkgpath}
+	return &Index{pkg: packageCodec.Decode(data), PkgPath: pkgpath}
 }
 
 // Encode encodes the receiver as gob-encoded data.
@@ -112,9 +119,13 @@ func KeyOf(t types.Type) (Key, bool) {
 
 // A Result reports a matching type or method in a method-set search.
 type Result struct {
-	TypeName    string   // name of the named type
-	IsInterface bool     // matched type (or method) is abstract
-	Location    Location // location of the type or method
+	TypeName    string // name of the named type
+	IsInterface bool   // matched type (or method) is abstract
+	// Location is the location of the type or method declaration.
+	// For a method promoted from another package via embedding, Location
+	// is zero; the caller must resolve it via (PkgPath, ObjectPath),
+	// for example using [Index.LocationOf] on the declaring package's index.
+	Location Location
 
 	// methods only:
 	PkgPath    string          // path of declaring package (may differ due to embedding)
@@ -247,6 +258,35 @@ func (index *Index) location(posn gobPosition) Location {
 	}
 }
 
+// LocationOf returns the location of the method declared in this
+// package with the given object path, if any.
+//
+// It is used to resolve the location of a method promoted via
+// embedding from another package: the embedding package's index
+// records only (PkgPath, ObjectPath) for such a method, and the
+// caller looks up the position here in the declaring package's
+// index, where it is keyed by this package's own file contents
+// (and so correctly invalidated when those contents change).
+func (index *Index) LocationOf(path objectpath.Path) (Location, bool) {
+	index.byObjectPathOnce.Do(func() {
+		for _, mset := range index.pkg.MethodSets {
+			for _, m := range mset.Methods {
+				if m.Posn.File != 0 { // declared in this package
+					if index.byObjectPath == nil {
+						index.byObjectPath = make(map[string]gobPosition)
+					}
+					index.byObjectPath[index.pkg.Strings[m.ObjectPath]] = m.Posn
+				}
+			}
+		}
+	})
+	posn, ok := index.byObjectPath[string(path)]
+	if !ok {
+		return Location{}, false
+	}
+	return index.location(posn), true
+}
+
 // An indexBuilder builds an index for a single package.
 type indexBuilder struct {
 	gobPackage
@@ -276,34 +316,30 @@ func (b *indexBuilder) build(fset *token.FileSet, pkg *types.Package) *Index {
 		p, err := objectpathFor(method.Origin())
 		if err != nil {
 			// This should never happen for a method of a package-level type.
-			// ...but it does (golang/go#70418).
-			// Refine the crash into various bug reports.
-			report := func() {
-				bug.Reportf("missing object path for %s", method.FullName())
-			}
-			sig := method.Signature()
-			if sig.Recv() == nil {
-				report()
-				return
-			}
-			_, named := typesinternal.ReceiverNamed(sig.Recv())
-			switch {
-			case named == nil:
-				report()
-			case sig.TypeParams().Len() > 0:
-				report()
-			case method.Origin() != method:
-				report() // instantiated?
-			case sig.RecvTypeParams().Len() > 0:
-				report() // generic?
-			default:
-				report()
-			}
-			return
+			// (It used to: see go.dev/issue70418.)
+			panic(err)
 		}
 
-		m.Posn = objectPos(method)
+		// Record the position only for methods declared in this
+		// package, so that the index is independent of the byte
+		// offsets of imported source files. (Storing import
+		// positions would force the cache key for this index to
+		// incorporate the full content of all reachable
+		// dependencies, defeating coarser invalidation.) Methods
+		// promoted from other packages are instead located at
+		// query time via (PkgPath, ObjectPath); see [Index.LocationOf].
+		if method.Pkg() == pkg {
+			m.Posn = objectPos(method)
+		}
 		m.PkgPath = b.string(method.Pkg().Path())
+		// The object path is computed relative to method.Pkg(),
+		// which may be this package or (for promoted methods) an
+		// imported one. objectpath.For is deterministic given the
+		// package's structure (scope names, method/field
+		// orderings), and that structure is preserved by gopls's
+		// export-data roundtrip, so the path computed here matches
+		// the one computed in the declaring package's own index —
+		// the same invariant that the xrefs index relies on.
 		m.ObjectPath = b.string(string(p))
 	}
 
@@ -419,7 +455,7 @@ type gobMethod struct {
 	Tricky      bool   // method type contains tricky features (type params, interface types)
 
 	// index records only (zero in KeyOf; also for index of error.Error).
-	Posn       gobPosition // location of method declaration
+	Posn       gobPosition // location of method declaration; zero if PkgPath != this package (resolve via LocationOf)
 	PkgPath    int         // path of package containing method declaration
 	ObjectPath int         // object path of method relative to PkgPath
 

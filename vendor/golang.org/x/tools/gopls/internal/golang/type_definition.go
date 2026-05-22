@@ -19,7 +19,7 @@ import (
 )
 
 // TypeDefinition handles the textDocument/typeDefinition request for Go files.
-func TypeDefinition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, position protocol.Position) ([]protocol.Location, error) {
+func TypeDefinition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range) ([]protocol.Location, error) {
 	ctx, done := event.Start(ctx, "golang.TypeDefinition")
 	defer done()
 
@@ -27,14 +27,11 @@ func TypeDefinition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handl
 	if err != nil {
 		return nil, err
 	}
-	pos, err := pgf.PositionPos(position)
+	start, end, err := pgf.RangePos(rng)
 	if err != nil {
 		return nil, err
 	}
-	cur, ok := pgf.Cursor.FindByPos(pos, pos)
-	if !ok {
-		return nil, fmt.Errorf("no enclosing syntax") // can't happen
-	}
+	cur, _, _, _ := astutil.Select(pgf.Cursor(), start, end) // can't fail (start, end are within File)
 
 	// Find innermost enclosing expression that has a type.
 	// It needn't be an identifier.
@@ -50,8 +47,8 @@ func TypeDefinition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handl
 
 		// edge case: switch id := expr.(type) {}
 		// id has no type; use expr instead.
-		if astutil.IsChildOf(cur, edge.AssignStmt_Lhs) &&
-			astutil.IsChildOf(cur.Parent(), edge.TypeSwitchStmt_Assign) {
+		if cur.ParentEdgeKind() == edge.AssignStmt_Lhs &&
+			cur.Parent().ParentEdgeKind() == edge.TypeSwitchStmt_Assign {
 			expr = cur.Parent().Node().(*ast.AssignStmt).Rhs[0].(*ast.TypeAssertExpr).X
 		}
 
@@ -69,13 +66,19 @@ func TypeDefinition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handl
 	if t == nil {
 		return nil, fmt.Errorf("no enclosing expression has a type")
 	}
-	tname := typeToObject(t)
-	if tname == nil {
-		return nil, fmt.Errorf("cannot find type name from type %s", t)
+	tnames := typeToObjects(t)
+	if len(tnames) == 0 {
+		return nil, fmt.Errorf("cannot find type name(s) from type %s", t)
 	}
-	loc, err := ObjectLocation(ctx, pkg.FileSet(), snapshot, tname)
-	if err != nil {
-		return nil, err
+
+	var locs []protocol.Location
+	for _, t := range tnames {
+		loc, err := ObjectLocation(ctx, pkg.FileSet(), snapshot, t)
+		if err != nil {
+			return nil, err
+		}
+		locs = append(locs, loc)
 	}
-	return []protocol.Location{loc}, nil
+
+	return locs, nil
 }

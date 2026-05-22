@@ -180,8 +180,7 @@ func canInlineVariable(info *types.Info, curFile inspector.Cursor, start, end to
 func isLvalueUse(cur inspector.Cursor, info *types.Info) bool {
 	cur = unparenEnclosing(cur)
 
-	kind, _ := cur.ParentEdge()
-	switch kind {
+	switch cur.ParentEdgeKind() {
 	case edge.AssignStmt_Lhs, edge.IncDecStmt_X:
 		return true // v=..., v++
 
@@ -206,7 +205,7 @@ func isLvalueUse(cur inspector.Cursor, info *types.Info) bool {
 // unparenEnclosing removes enclosing parens from cur in
 // preparation for a call to [Cursor.ParentEdge].
 func unparenEnclosing(cur inspector.Cursor) inspector.Cursor {
-	for astutil.IsChildOf(cur, edge.ParenExpr_X) {
+	for cur.ParentEdgeKind() == edge.ParenExpr_X {
 		cur = cur.Parent()
 	}
 	return cur
@@ -217,19 +216,20 @@ func unparenEnclosing(cur inspector.Cursor) inspector.Cursor {
 func inlineVariableOne(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (*token.FileSet, *analysis.SuggestedFix, error) {
 	countInlineVariable.Inc()
 	info := pkg.TypesInfo()
-	curUse, curRHS, ok := canInlineVariable(info, pgf.Cursor, start, end)
+	curUse, curRHS, ok := canInlineVariable(info, pgf.Cursor(), start, end)
 	if !ok {
 		return nil, nil, fmt.Errorf("cannot inline variable here")
 	}
-	use := curUse.Node().(*ast.Ident)
 
 	// Check that free symbols of rhs are unshadowed at curUse.
 	var (
+		use   = curUse.Node().(*ast.Ident)
+		rhs   = curRHS.Node().(ast.Expr)
 		pos   = use.Pos()
 		scope = info.Scopes[pgf.File].Innermost(pos)
 	)
 	for curIdent := range curRHS.Preorder((*ast.Ident)(nil)) {
-		if astutil.IsChildOf(curIdent, edge.SelectorExpr_Sel) {
+		if curIdent.ParentEdgeKind() == edge.SelectorExpr_Sel {
 			continue // ignore f in x.f
 		}
 		id := curIdent.Node().(*ast.Ident)
@@ -240,7 +240,7 @@ func inlineVariableOne(pkg *cache.Package, pgf *parsego.File, start, end token.P
 		if v, ok := obj1.(*types.Var); ok && v.IsField() {
 			continue // a field reference T{F: 0} is non-lexical
 		}
-		if astutil.NodeContainsPos(curRHS.Node(), obj1.Pos()) {
+		if astutil.NodeContainsPos(rhs, obj1.Pos()) {
 			continue // not free (id is defined within RHS)
 		}
 		_, obj2 := scope.LookupParent(id.Name, pos)
@@ -252,13 +252,16 @@ func inlineVariableOne(pkg *cache.Package, pgf *parsego.File, start, end token.P
 
 	// TODO(adonovan): also reject variables that are updated by assignments?
 
+	// Add parens to 'new' as needed by the 'use' context.
+	rhs = astutil.MaybeParenthesize(curUse.Parent().Node(), use, rhs)
+
 	return pkg.FileSet(), &analysis.SuggestedFix{
 		Message: fmt.Sprintf("Replace variable %q by its initializer expression", use.Name),
 		TextEdits: []analysis.TextEdit{
 			{
 				Pos:     use.Pos(),
 				End:     use.End(),
-				NewText: []byte(FormatNode(pkg.FileSet(), curRHS.Node())),
+				NewText: []byte(FormatNode(pkg.FileSet(), rhs)),
 			},
 		},
 	}, nil

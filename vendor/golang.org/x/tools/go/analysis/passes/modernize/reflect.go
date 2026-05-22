@@ -65,27 +65,21 @@ func reflecttypefor(pass *analysis.Pass) (any, error) {
 		// Special cases for TypeOf((*T)(nil)).Elem(), and
 		// TypeOf([]T(nil)).Elem(), needed when T is an interface type.
 		if curCall.ParentEdgeKind() == edge.SelectorExpr_X {
-			curSel := unparenEnclosing(curCall).Parent()
+			curSel := astutil.UnparenEnclosingCursor(curCall).Parent()
 			if curSel.ParentEdgeKind() == edge.CallExpr_Fun {
-				call2 := unparenEnclosing(curSel).Parent().Node().(*ast.CallExpr) // potentially .Elem()
+				call2 := astutil.UnparenEnclosingCursor(curSel).Parent().Node().(*ast.CallExpr) // potentially .Elem()
 				obj := typeutil.Callee(info, call2)
 				if typesinternal.IsMethodNamed(obj, "reflect", "Type", "Elem") {
 					// reflect.TypeOf(expr).Elem()
 					//                     -------
 					// reflect.TypeOf(expr)
-					removeElem := []analysis.TextEdit{{
-						Pos: call.End(),
-						End: call2.End(),
-					}}
-					switch typ := t.(type) {
-					case *types.Pointer:
-						// Have: TypeOf(expr).Elem() where expr : *T
+					if typ, hasElem := t.(interface{ Elem() types.Type }); hasElem {
+						// Have: TypeOf(expr).Elem() where expr is *T, []T, [k]T, chan T, map[K]T, etc.
 						t = typ.Elem()
-						edits = removeElem
-					case *types.Slice:
-						// Have: TypeOf(expr).Elem() where expr : []T
-						t = typ.Elem()
-						edits = removeElem
+						edits = []analysis.TextEdit{{
+							Pos: call.End(),
+							End: call2.End(),
+						}}
 					}
 				}
 			}

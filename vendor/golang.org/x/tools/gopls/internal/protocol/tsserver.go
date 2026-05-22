@@ -27,23 +27,29 @@ type Server interface {
 	IncomingCalls(context.Context, *CallHierarchyIncomingCallsParams) ([]CallHierarchyIncomingCall, error)
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#callHierarchy_outgoingCalls
 	OutgoingCalls(context.Context, *CallHierarchyOutgoingCallsParams) ([]CallHierarchyOutgoingCall, error)
-	// To support microsoft/language-server-protocol#1164, the language server
-	// need to read the form with client-supplied answers and either returns a
-	// CodeAction with errors in the form surfacing the error to the client, or a
-	// CodeAction with properties the language client is waiting for (e.g. edits,
-	// commands).
-	//
-	// The language client may call "codeAction/resolve" if the language server
-	// returns a CodeAction with errors or try asking the user for completing the
-	// form again.
-	// The language client may call "codeAction/resolve" multiple times with user
-	// filled (re-filled) answers in the form until it obtains a CodeAction with
-	// properties (e.g. edits, commands) it's waiting for.
-	//
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#codeAction_resolve
 	ResolveCodeAction(context.Context, *CodeAction) (*CodeAction, error)
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#codeLens_resolve
 	ResolveCodeLens(context.Context, *CodeLens) (*CodeLens, error)
+	// ResolveCommand handles the interactive resolution of a command prior to
+	// its execution.
+	//
+	// It processes an [ExecuteCommandParams] to determine if the command requires
+	// interactive input, or to validate user-provided answers submitted via the
+	// embedded [InteractiveParams].
+	//
+	// If the command requires user input (e.g., the initial probe) or if the
+	// provided answers are invalid, it returns a modified [ExecuteCommandParams]
+	// populated with FormFields to prompt the user. If the input is valid and
+	// complete, or if the command requires no interaction at all, it returns an
+	// [ExecuteCommandParams] with an empty form, signaling the client to proceed
+	// with execution.
+	//
+	// See [InteractiveParams] for the complete multi-step client-server handshake
+	// and the architectural reasoning behind dedicated ResolveXXX methods.
+	//
+	// Note: This is a non-standard protocol extension.
+	ResolveCommand(context.Context, *ExecuteCommandParams) (*ExecuteCommandParams, error)
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#completionItem_resolve
 	ResolveCompletionItem(context.Context, *CompletionItem) (*CompletionItem, error)
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#documentLink_resolve
@@ -56,6 +62,16 @@ type Server interface {
 	Initialized(context.Context, *InitializedParams) error
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#inlayHint_resolve
 	Resolve(context.Context, *InlayHint) (*InlayHint, error)
+	// InteractiveListEnum is the request handler for fetching dynamic enum options.
+	//
+	// This method is called by the client when the user interacts with a
+	// FormFieldTypeLazyEnum field (e.g., typing in a combo box). The server
+	// uses the provided Action and Params to determine the context (e.g.,
+	// "search workspace symbols for interfaces") and returns a filtered list
+	// of matching entries.
+	//
+	// Note: This is a non-standard protocol extension.
+	InteractiveListEnum(context.Context, *InteractiveListEnumParams) ([]FormEnumEntry, error)
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#notebookDocument_didChange
 	DidChangeNotebookDocument(context.Context, *DidChangeNotebookDocumentParams) error
 	// See https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#notebookDocument_didClose
@@ -257,6 +273,17 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		}
 		return resp, true, nil
 
+	case "command/resolve":
+		var params ExecuteCommandParams
+		if err := UnmarshalJSON(raw, &params); err != nil {
+			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		resp, err := server.ResolveCommand(ctx, &params)
+		if err != nil {
+			return nil, true, err
+		}
+		return resp, true, nil
+
 	case "completionItem/resolve":
 		var params CompletionItem
 		if err := UnmarshalJSON(raw, &params); err != nil {
@@ -308,6 +335,17 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
 		resp, err := server.Resolve(ctx, &params)
+		if err != nil {
+			return nil, true, err
+		}
+		return resp, true, nil
+
+	case "interactive/listEnum":
+		var params InteractiveListEnumParams
+		if err := UnmarshalJSON(raw, &params); err != nil {
+			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		resp, err := server.InteractiveListEnum(ctx, &params)
 		if err != nil {
 			return nil, true, err
 		}
@@ -387,6 +425,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.Completion(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -398,6 +444,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.Declaration(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -408,6 +462,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params DefinitionParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.Definition(ctx, &params)
 		if err != nil {
@@ -474,6 +536,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.DocumentHighlight(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -529,6 +599,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.Hover(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -539,6 +617,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params ImplementationParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.Implementation(ctx, &params)
 		if err != nil {
@@ -562,6 +648,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.InlineCompletion(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -584,6 +678,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.LinkedEditingRange(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -594,6 +696,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params MonikerParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.Moniker(ctx, &params)
 		if err != nil {
@@ -617,6 +727,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.PrepareCallHierarchy(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -628,6 +746,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.PrepareRename(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -638,6 +764,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params TypeHierarchyPrepareParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.PrepareTypeHierarchy(ctx, &params)
 		if err != nil {
@@ -672,6 +806,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.References(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -682,6 +824,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params RenameParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.Rename(ctx, &params)
 		if err != nil {
@@ -738,6 +888,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
 		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
+		}
 		resp, err := server.SignatureHelp(ctx, &params)
 		if err != nil {
 			return nil, true, err
@@ -748,6 +906,14 @@ func ServerDispatchCall(ctx context.Context, server Server, method string, raw j
 		var params TypeDefinitionParams
 		if err := UnmarshalJSON(raw, &params); err != nil {
 			return nil, true, fmt.Errorf("%w: %s", jsonrpc2.ErrParse, err)
+		}
+		if params.Range == (Range{}) {
+			params.Range = Range{
+				Start: params.Position,
+				End:   params.Position,
+			}
+		} else if !params.Range.Contains(params.Position) {
+			return nil, true, fmt.Errorf("position %v is outside the provided range %v.", params.Position, params.Range)
 		}
 		resp, err := server.TypeDefinition(ctx, &params)
 		if err != nil {
@@ -979,6 +1145,13 @@ func (s *serverDispatcher) ResolveCodeLens(ctx context.Context, params *CodeLens
 	}
 	return result, nil
 }
+func (s *serverDispatcher) ResolveCommand(ctx context.Context, params *ExecuteCommandParams) (*ExecuteCommandParams, error) {
+	var result *ExecuteCommandParams
+	if err := s.sender.Call(ctx, "command/resolve", params, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
 func (s *serverDispatcher) ResolveCompletionItem(ctx context.Context, params *CompletionItem) (*CompletionItem, error) {
 	var result *CompletionItem
 	if err := s.sender.Call(ctx, "completionItem/resolve", params, &result); err != nil {
@@ -1009,6 +1182,13 @@ func (s *serverDispatcher) Initialized(ctx context.Context, params *InitializedP
 func (s *serverDispatcher) Resolve(ctx context.Context, params *InlayHint) (*InlayHint, error) {
 	var result *InlayHint
 	if err := s.sender.Call(ctx, "inlayHint/resolve", params, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+func (s *serverDispatcher) InteractiveListEnum(ctx context.Context, params *InteractiveListEnumParams) ([]FormEnumEntry, error) {
+	var result []FormEnumEntry
+	if err := s.sender.Call(ctx, "interactive/listEnum", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil

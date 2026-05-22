@@ -37,7 +37,7 @@ func DocCommentToMarkdown(text string, options *settings.Options) string {
 
 	var printer comment.Printer
 	// The default produces {#Hdr-...} tags for headings.
-	// vscode displays thems, which is undesirable.
+	// vscode displays them, which is undesirable.
 	// The godoc for comment.Printer says the tags
 	// avoid a security problem.
 	printer.HeadingID = func(*comment.Heading) string { return "" }
@@ -60,8 +60,8 @@ func DocCommentToMarkdown(text string, options *settings.Options) string {
 // If there is no reference at pos, returns errNoCommentReference.
 //
 // TODO(hxjiang): simplify the error handling.
-func docLinkDefinition(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.Package, pgf *parsego.File, pos token.Pos) ([]protocol.Location, error) {
-	obj, _, err := resolveDocLink(pkg, pgf, astutil.RangeOf(pos, pos))
+func docLinkDefinition(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.Package, pgf *parsego.File, start, end token.Pos) ([]protocol.Location, error) {
+	obj, _, err := resolveDocLink(pkg, pgf, astutil.RangeOf(start, end))
 	if err != nil {
 		return nil, err
 	}
@@ -131,16 +131,19 @@ func commentDocLinks(cg *ast.CommentGroup) iter.Seq[docLink] {
 			// unfortunately its API provides no way to reliably reconstruct the
 			// position of each doc link from the parsed result.
 
-			for _, idx := range docLinkRegex.FindAllStringSubmatchIndex(comment.Text, -1) {
-				mstart, mend := idx[2], idx[3]
-
-				// [bracketPos.Start, bracketPos.End) identifies the start and end
-				// of the brackets. e.g. "[fmt.Scanner.Scan]".
-				bracketText := comment.Text[mstart-1 : mend+1]
-
+			for _, idx := range findDocLinkIndices(comment.Text) {
 				// [mstart, mend) identifies the first submatch, which is the
 				// reference name in the doc link (sans '*').
 				// e.g. The "[fmt.Println]" reference name is "fmt.Println".
+				mstart, mend := idx[2], idx[3]
+
+				// idx[0], idx[1] matches the full pattern. idx[0] corresponds
+				// to the opening bracket. idx[1] may include trailing
+				// whitespace or punctuation, so we need to use "mend" to
+				// capture the exact location of the closing bracket, which must
+				// be one space after the end of the reference name.
+				bracketText := comment.Text[idx[0] : mend+1]
+
 				match := comment.Text[mstart:mend]
 
 				if strings.Contains(match, "\n") {

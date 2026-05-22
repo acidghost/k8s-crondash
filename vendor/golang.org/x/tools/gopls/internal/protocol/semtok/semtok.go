@@ -5,7 +5,10 @@
 // The semtok package provides an encoder for LSP's semantic tokens.
 package semtok
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+)
 
 // A Token provides the extent and semantics of a token.
 type Token struct {
@@ -31,6 +34,7 @@ const (
 	TokNumber    Type = "number"        // for a numeric literal
 	TokOperator  Type = "operator"      // for an operator
 	TokParameter Type = "parameter"     // for a parameter variable
+	TokProperty  Type = "property"      // for a struct field
 	TokString    Type = "string"        // for a string literal
 	TokType      Type = "type"          // for a type name (plus other uses)
 	TokTypeParam Type = "typeParameter" // for a type parameter
@@ -40,24 +44,24 @@ const (
 	//
 	// If you move types to above, document it in
 	// gopls/doc/features/passive.md#semantic-tokens.
-	// TokClass      TokenType = "class"
-	// TokDecorator  TokenType = "decorator"
-	// TokEnum       TokenType = "enum"
-	// TokEnumMember TokenType = "enumMember"
-	// TokEvent      TokenType = "event"
-	// TokInterface  TokenType = "interface"
-	// TokModifier   TokenType = "modifier"
-	// TokProperty   TokenType = "property"
-	// TokRegexp     TokenType = "regexp"
-	// TokStruct     TokenType = "struct"
+	// TokClass      Type = "class"
+	// TokDecorator  Type = "decorator"
+	// TokEnum       Type = "enum"
+	// TokEnumMember Type = "enumMember"
+	// TokEvent      Type = "event"
+	// TokInterface  Type = "interface"
+	// TokModifier   Type = "modifier"
+	// TokRegexp     Type = "regexp"
+	// TokStruct     Type = "struct"
 )
 
-// TokenTypes is a slice of types gopls will return as its server capabilities.
-var TokenTypes = []Type{
+// Types is a slice of types gopls will return as its server capabilities.
+var Types = []Type{
 	TokNamespace,
 	TokType,
 	TokTypeParam,
 	TokParameter,
+	TokProperty,
 	TokVariable,
 	TokFunction,
 	TokMethod,
@@ -74,13 +78,14 @@ type Modifier string
 
 const (
 	// LSP 3.18 standard modifiers
-	// As with TokenTypes, clients get only the modifiers they request.
+	// As with Types, clients get only the modifiers they request.
 	//
 	// The section below defines a subset of modifiers in standard modifiers
 	// that gopls understand.
 	ModDefaultLibrary Modifier = "defaultLibrary" // for predeclared symbols
 	ModDefinition     Modifier = "definition"     // for the declaring identifier of a symbol
 	ModReadonly       Modifier = "readonly"       // for constants (TokVariable)
+	ModStatic         Modifier = "static"         // for package-level variables
 	// The section below defines the rest of the modifiers in standard modifiers
 	// that gopls does not use.
 	//
@@ -92,7 +97,6 @@ const (
 	// ModDeprecated    Modifier = "deprecated"
 	// ModDocumentation Modifier = "documentation"
 	// ModModification  Modifier = "modification"
-	// ModStatic        Modifier = "static"
 
 	// non-standard modifiers
 	//
@@ -111,15 +115,16 @@ const (
 	ModSlice     Modifier = "slice"
 	ModString    Modifier = "string"
 	ModStruct    Modifier = "struct"
+	ModShadowing Modifier = "shadowing" // shadowing definition
 )
 
-// TokenModifiers is a slice of modifiers gopls will return as its server
-// capabilities.
-var TokenModifiers = []Modifier{
+// Modifiers is a slice of modifiers gopls will return as its server capabilities.
+var Modifiers = []Modifier{
 	// LSP 3.18 standard modifiers.
 	ModDefinition,
 	ModReadonly,
 	ModDefaultLibrary,
+	ModStatic,
 	// Additional custom modifiers.
 	ModArray,
 	ModBool,
@@ -133,6 +138,7 @@ var TokenModifiers = []Modifier{
 	ModSlice,
 	ModString,
 	ModStruct,
+	ModShadowing,
 }
 
 // Encode returns the LSP encoding of a sequence of tokens.
@@ -144,60 +150,53 @@ func Encode(
 	encodeType map[Type]bool,
 	encodeModifier map[Modifier]bool) []uint32 {
 
-	// binary operators, at least, will be out of order
-	sort.Slice(tokens, func(i, j int) bool {
-		if tokens[i].Line != tokens[j].Line {
-			return tokens[i].Line < tokens[j].Line
+	// Binary operators, at least, will be out of order.
+	slices.SortFunc(tokens, func(x, y Token) int {
+		if d := cmp.Compare(x.Line, y.Line); d != 0 {
+			return d
 		}
-		return tokens[i].Start < tokens[j].Start
+		return cmp.Compare(x.Start, y.Start)
 	})
 
-	typeMap := make(map[Type]int)
-	for i, t := range TokenTypes {
+	typeMap := make(map[Type]uint32)
+	for i, t := range Types {
 		if enable, ok := encodeType[t]; ok && !enable {
 			continue
 		}
-		typeMap[Type(t)] = i
+		typeMap[Type(t)] = uint32(i)
 	}
 
-	modMap := make(map[Modifier]int)
-	for i, m := range TokenModifiers {
+	modMap := make(map[Modifier]uint32)
+	for i, m := range Modifiers {
 		if enable, ok := encodeModifier[m]; ok && !enable {
 			continue
 		}
 		modMap[Modifier(m)] = 1 << i
 	}
 
-	// each semantic token needs five values but some tokens might be skipped.
-	// (see Integer Encoding for Tokens in the LSP spec)
-	x := make([]uint32, 5*len(tokens))
-	var j int
-	var last Token
-	for i := range tokens {
-		item := tokens[i]
-		typ, ok := typeMap[item.Type]
+	// Each semantic token needs five values but some tokens might be skipped.
+	// See "Integer Encoding for Tokens":
+	// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_semanticTokens
+	code := make([]uint32, 0, 5*len(tokens))
+	var prev Token // Line=Start=0
+	for _, token := range tokens {
+		tokenType, ok := typeMap[token.Type]
 		if !ok {
-			continue // client doesn't want semantic token info.
+			continue // client explicitly disabled this type
 		}
-		if j == 0 {
-			x[0] = tokens[0].Line
-		} else {
-			x[j] = item.Line - last.Line
+		var (
+			deltaLine      = token.Line - prev.Line
+			deltaStart     = token.Start - prev.Start // same line: delta encoding of start
+			tokenModifiers uint32
+		)
+		if deltaLine > 0 {
+			deltaStart = token.Start // new line: absolute encoding of start
 		}
-		x[j+1] = item.Start
-		if j > 0 && x[j] == 0 {
-			x[j+1] = item.Start - last.Start
+		for _, s := range token.Modifiers {
+			tokenModifiers |= modMap[s] // zero if client explicitly disabled this modifier
 		}
-		x[j+2] = item.Len
-		x[j+3] = uint32(typ)
-		mask := 0
-		for _, s := range item.Modifiers {
-			// modMap[s] is 0 if the client doesn't want this modifier
-			mask |= modMap[s]
-		}
-		x[j+4] = uint32(mask)
-		j += 5
-		last = item
+		code = append(code, deltaLine, deltaStart, token.Len, tokenType, tokenModifiers)
+		prev = token
 	}
-	return x[:j]
+	return code
 }

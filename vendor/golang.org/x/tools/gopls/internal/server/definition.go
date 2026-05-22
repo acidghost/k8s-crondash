@@ -35,11 +35,11 @@ func (s *server) Definition(ctx context.Context, params *protocol.DefinitionPara
 	defer release()
 	switch kind := snapshot.FileKind(fh); kind {
 	case file.Tmpl:
-		return template.Definition(snapshot, fh, params.Position)
+		return template.Definition(snapshot, fh, params.Range)
 	case file.Go:
-		return golang.Definition(ctx, snapshot, fh, params.Position)
+		return golang.Definition(ctx, snapshot, fh, params.Range)
 	case file.Asm:
-		return goasm.Definition(ctx, snapshot, fh, params.Position)
+		return goasm.Definition(ctx, snapshot, fh, params.Range)
 	default:
 		return nil, fmt.Errorf("can't find definitions for file type %s", kind)
 	}
@@ -54,10 +54,11 @@ func (s *server) TypeDefinition(ctx context.Context, params *protocol.TypeDefini
 	if err != nil {
 		return nil, err
 	}
+
 	defer release()
 	switch kind := snapshot.FileKind(fh); kind {
 	case file.Go:
-		return golang.TypeDefinition(ctx, snapshot, fh, params.Position)
+		return golang.TypeDefinition(ctx, snapshot, fh, params.Range)
 	default:
 		return nil, fmt.Errorf("can't find type definitions for file type %s", kind)
 	}

@@ -7,6 +7,7 @@ package settings
 import (
 	"fmt"
 	"maps"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -109,6 +110,9 @@ type ClientOptions struct {
 	// SupportedWorkDoneProgressFormats specifies the formats supported by the
 	// client for handling workdone progress metadata.
 	SupportedWorkDoneProgressFormats map[WorkDoneProgressStyle]bool
+	// SupportedInteractiveInputTypes specifies the interactive types supported
+	// by the client.
+	SupportedInteractiveInputTypes map[InteractiveInputType]bool
 }
 
 // ServerOptions holds LSP-specific configuration that is provided by the
@@ -221,8 +225,9 @@ type UIOptions struct {
 	// ```
 	Codelenses map[CodeLensSource]bool
 
-	// SemanticTokens controls whether the LSP server will send
-	// semantic tokens to the client.
+	// SemanticTokens determines whether gopls will return a
+	// SemanticTokensProvider at initialization, or respond
+	// to request for semantic tokens.
 	SemanticTokens bool `status:"experimental"`
 
 	// NoSemanticString turns off the sending of the semantic token 'string'
@@ -433,7 +438,7 @@ const (
 
 // MarshalJSON implements the json.Marshaler interface, so that the default
 // values are formatted correctly in documentation. (See [Options.setOne] for
-// the flexible custom unmarshalling behavior).
+// the flexible custom unmarshaling behavior).
 func (l LinksInHoverEnum) MarshalJSON() ([]byte, error) {
 	switch l {
 	case LinksInHover_None:
@@ -614,7 +619,7 @@ const (
 	// implicitly ignored.
 	//
 	// To suppress the hint, write an actual comment containing
-	// "ignore error" following the call statement, or explictly
+	// "ignore error" following the call statement, or explicitly
 	// assign the result to a blank variable. A handful of common
 	// functions such as `fmt.Println` are excluded from the
 	// check.
@@ -658,6 +663,25 @@ type UserOptions struct {
 	UIOptions
 	FormattingOptions
 
+	// FileWatcher specifies the server-side file watching strategy used by gopls.
+	//
+	// By default, this is set to "off", meaning gopls relies exclusively on the
+	// language client (e.g., the editor) to send file change notifications.
+	//
+	// Available options:
+	//   - "off"      : Client-driven watching (default)
+	//   - "fsnotify" : OS-level event notifications
+	//   - "poll"     : Periodic directory scanning
+	FileWatcher FileWatcherMode `status:"experimental"`
+
+	// MaxFileCacheBytes sets a soft limit on the file cache size in bytes.
+	// If zero, the default budget is used.
+	//
+	// The cache may temporarily use more than this amount.
+	// Also, this parameter limits file contents; disk block usage
+	// as measured by du(1) may be significantly higher.
+	MaxFileCacheBytes int64 `status:"experimental"`
+
 	// VerboseOutput enables additional debug logging.
 	VerboseOutput bool `status:"debug"`
 }
@@ -686,6 +710,18 @@ func (u *UserOptions) SetEnvSlice(env []string) {
 type WorkDoneProgressStyle string
 
 const WorkDoneProgressStyleLog WorkDoneProgressStyle = "log"
+
+type InteractiveInputType string
+
+const (
+	InteractiveInputTypeString   InteractiveInputType = "string"
+	InteractiveInputTypeFile     InteractiveInputType = "file"
+	InteractiveInputTypeBool     InteractiveInputType = "bool"
+	InteractiveInputTypeNumber   InteractiveInputType = "number"
+	InteractiveInputTypeEnum     InteractiveInputType = "enum"
+	InteractiveInputTypeLazyEnum InteractiveInputType = "lazyEnum"
+	InteractiveInputTypeList     InteractiveInputType = "list"
+)
 
 // InternalOptions contains settings that are not intended for use by the
 // average user. These may be settings used by tests or outdated settings that
@@ -801,6 +837,14 @@ type InternalOptions struct {
 	// allowing pull diagnostics by default.
 	PullDiagnostics bool
 }
+
+type FileWatcherMode string
+
+const (
+	FileWatcherOff      FileWatcherMode = "off"
+	FileWatcherFSNotify FileWatcherMode = "fsnotify"
+	FileWatcherPoll     FileWatcherMode = "poll"
+)
 
 type SubdirWatchPatterns string
 
@@ -1043,16 +1087,20 @@ func (o *Options) ForClientCapabilities(clientInfo *protocol.ClientInfo, caps pr
 				o.SupportedWorkDoneProgressFormats[WorkDoneProgressStyle(f.(string))] = true
 			}
 		}
+
+		if inputTypes, ok := experimental["interactiveInputTypes"].([]any); ok {
+			o.SupportedInteractiveInputTypes = make(map[InteractiveInputType]bool, len(inputTypes))
+			for _, t := range inputTypes {
+				o.SupportedInteractiveInputTypes[InteractiveInputType(t.(string))] = true
+			}
+		}
 	}
 }
 
 var codec = frob.CodecFor[*Options]()
 
 func (o *Options) Clone() *Options {
-	data := codec.Encode(o)
-	var clone *Options
-	codec.Decode(data, &clone)
-	return clone
+	return codec.Decode(codec.Encode(o))
 }
 
 // validateDirectoryFilter validates if the filter string
@@ -1147,10 +1195,16 @@ func (o *Options) setOne(name string, value any) (applied []CounterPath, _ error
 	case "completionBudget":
 		return nil, setDuration(&o.CompletionBudget, value)
 	case "importsSource":
-		return setEnum(&o.ImportsSource, value,
+		res, err := setEnum(&o.ImportsSource, value,
 			ImportsSourceOff,
 			ImportsSourceGopls,
 			ImportsSourceGoimports)
+		if err != nil {
+			return nil, err
+		}
+		return res, &SoftError{
+			msg: "importsSource is deprecated as it is no longer needed",
+		}
 	case "matcher":
 		return setEnum(&o.Matcher, value,
 			Fuzzy,
@@ -1209,14 +1263,7 @@ func (o *Options) setOne(name string, value any) (applied []CounterPath, _ error
 			DefinitionShortcut)
 
 	case "analyses":
-		counts, err := setBoolMap(&o.Analyses, value)
-		if err != nil {
-			return nil, err
-		}
-		if o.Analyses["fieldalignment"] {
-			return counts, &SoftError{"the 'fieldalignment' analyzer was removed in gopls/v0.17.0; instead, hover over struct fields to see size/offset information (https://go.dev/issue/67762)"}
-		}
-		return counts, nil
+		return setBoolMap(&o.Analyses, value)
 
 	case "hints":
 		return setBoolMap(&o.Hints, value)
@@ -1264,6 +1311,9 @@ func (o *Options) setOne(name string, value any) (applied []CounterPath, _ error
 
 	case "local":
 		return nil, setString(&o.Local, value)
+
+	case "maxFileCacheBytes":
+		return setInt64(&o.MaxFileCacheBytes, value)
 
 	case "verboseOutput":
 		return setBool(&o.VerboseOutput, value)
@@ -1370,6 +1420,9 @@ func (o *Options) setOne(name string, value any) (applied []CounterPath, _ error
 
 	case "renameMovesSubpackages":
 		return setBool(&o.RenameMovesSubpackages, value)
+
+	case "fileWatcher":
+		return setEnum(&o.FileWatcher, value, FileWatcherOff, FileWatcherFSNotify, FileWatcherPoll)
 
 	// deprecated and renamed settings
 	//
@@ -1672,4 +1725,44 @@ func asEnum[S ~string](value any, options ...S) (S, error) {
 		}
 	}
 	return "", fmt.Errorf("invalid option %q for enum", str)
+}
+
+func setInt64(dest *int64, value any) ([]CounterPath, error) {
+	i, err := asInt64(value)
+	if err != nil {
+		return nil, err
+	}
+	*dest = i
+	return []CounterPath{{fmt.Sprint(i)}}, nil
+}
+
+func asInt64(value any) (int64, error) {
+	switch v := value.(type) {
+
+	case float64:
+		// Note that this is what we expect since JSON unmarshalling
+		// into any produces float64 for numbers.
+		if !isFinite(v) {
+			return 0, fmt.Errorf("invalid value %v (want finite number)", v)
+		}
+		if v != math.Trunc(v) {
+			return 0, fmt.Errorf("invalid value %v (want integer)", v)
+		}
+		if v != float64(int64(v)) {
+			return 0, fmt.Errorf("invalid value %v (not representable as int64)", v)
+		}
+		return int64(v), nil
+	case int64:
+		return v, nil
+	case int:
+		return int64(v), nil
+	default:
+		return 0, fmt.Errorf("invalid type %T (want int64)", value)
+	}
+}
+
+// isFinite reports whether f represents a finite rational value.
+// It is equivalent to !math.IsNan(f) && !math.IsInf(f, 0).
+func isFinite(f float64) bool {
+	return math.Abs(f) <= math.MaxFloat64
 }

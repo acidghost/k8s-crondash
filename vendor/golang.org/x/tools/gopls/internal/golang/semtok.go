@@ -15,6 +15,7 @@ import (
 	"go/token"
 	"go/types"
 	"log"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -82,12 +83,21 @@ func SemanticTokens(ctx context.Context, snapshot *cache.Snapshot, fh file.Handl
 		start:          start,
 		end:            end,
 	}
+
 	tv.visit()
+
+	semanticTokenModifiers := snapshot.Options().EnabledSemanticTokenModifiers()
+	if snapshot.IsBuiltin(fh.URI()) {
+		// The shadowing modifier is not appropriate for the fake builtin.go file.
+		semanticTokenModifiers = maps.Clone(semanticTokenModifiers)
+		semanticTokenModifiers[semtok.ModShadowing] = false
+	}
+
 	return &protocol.SemanticTokens{
 		Data: semtok.Encode(
 			tv.tokens,
 			snapshot.Options().EnabledSemanticTokenTypes(),
-			snapshot.Options().EnabledSemanticTokenModifiers()),
+			semanticTokenModifiers),
 		ResultID: time.Now().String(), // for delta requests, but we've never seen any
 	}, nil
 }
@@ -152,9 +162,53 @@ func (tv *tokenVisitor) visit() {
 }
 
 // Matches (for example) "[F]", "[*p.T]", "[p.T.M]"
-// unless followed by a colon (exclude url link, e.g. "[go]: https://go.dev").
 // The first group is reference name. e.g. The first group of "[*p.T.M]" is "p.T.M".
-var docLinkRegex = regexp.MustCompile(`\[\*?([\pL_][\pL_0-9]*(\.[\pL_][\pL_0-9]*){0,2})](?:[^:]|$)`)
+var docLinkRegex = regexp.MustCompile(`\[\*?([\pL_][\pL_0-9]*(\.[\pL_][\pL_0-9]*){0,2})]`)
+
+// findDocLinkIndices finds the indices of the doc links in the line.
+// It will ignore the url link, e.g. "[go]: https://go.dev".
+// For a invalid url link, it would be considered as a doc link, e.g. "[go]: h://go.dev".
+func findDocLinkIndices(line string) [][]int {
+	indices := docLinkRegex.FindAllStringSubmatchIndex(line, -1)
+
+	ret := slices.DeleteFunc(
+		indices,
+		func(index []int) bool {
+			// end is the end index of the first submatch, which is the next pos of ']'
+			end := index[1]
+
+			if end < len(line) && line[end] == ':' {
+				url := strings.TrimSpace(line[end+1:])
+				before, _, found := strings.Cut(url, "://")
+				if found && isScheme(before) {
+					// Valid URL, skip this match
+					return true
+				}
+			}
+
+			return false
+		},
+	)
+
+	return ret
+}
+
+// isScheme reports whether s is a recognized URL scheme.
+// Note that if strings of new length (beyond 3-7)
+// are added here, the fast path at the top of autoURL will need updating.
+func isScheme(s string) bool {
+	switch s {
+	case "file",
+		"ftp",
+		"gopher",
+		"http",
+		"https",
+		"mailto",
+		"nntp":
+		return true
+	}
+	return false
+}
 
 // comment emits semantic tokens for a comment.
 // If the comment contains doc links or "go:" directives,
@@ -214,7 +268,7 @@ func (tv *tokenVisitor) comment(c *ast.Comment, importByName map[string]*types.P
 	for line := range strings.SplitSeq(c.Text, "\n") {
 		last := 0
 
-		for _, idx := range docLinkRegex.FindAllStringSubmatchIndex(line, -1) {
+		for _, idx := range findDocLinkIndices(line) {
 			// The first group is the reference name. e.g. "X", "p.T", "p.T.M".
 			name := line[idx[2]:idx[3]]
 			if objs := lookupObjects(name); len(objs) > 0 {
@@ -277,8 +331,7 @@ func (tv *tokenVisitor) token(start token.Pos, length int, typ semtok.Type, modi
 // strStack converts the stack to a string, for debugging and error messages.
 func (tv *tokenVisitor) strStack() string {
 	msg := []string{"["}
-	for i := len(tv.stack) - 1; i >= 0; i-- {
-		n := tv.stack[i]
+	for _, n := range slices.Backward(tv.stack) {
 		msg = append(msg, strings.TrimPrefix(fmt.Sprintf("%T", n), "*ast."))
 	}
 	if len(tv.stack) > 0 {
@@ -549,11 +602,15 @@ func (tv *tokenVisitor) appendObjectModifiers(mods []semtok.Modifier, obj types.
 		return semtok.TokVariable, mods
 
 	case *types.Var:
-		if tv.isParam(obj.Pos()) {
+		switch obj.Kind() {
+		case types.PackageVar:
+			mods = append(mods, semtok.ModStatic)
+		case types.RecvVar, types.ParamVar:
 			return semtok.TokParameter, mods
-		} else {
-			return semtok.TokVariable, mods
+		case types.FieldVar:
+			return semtok.TokProperty, mods
 		}
+		return semtok.TokVariable, mods
 
 	case *types.Label:
 		return semtok.TokLabel, mods
@@ -610,6 +667,49 @@ func appendTypeModifiers(mods []semtok.Modifier, t types.Type) []semtok.Modifier
 	return mods
 }
 
+// isShadowing reports whether id is shadowing some other definiton from outer scopes.
+func (tv *tokenVisitor) isShadowing(id *ast.Ident) bool {
+	if obj, ok := tv.info.Defs[id]; obj != nil {
+		// obj.Parent.Parent is the surrounding scope. If we can find another declaration
+		// starting from there id is a shadowing identifier.
+		if obj.Parent() != nil && obj.Parent().Parent() != nil {
+			if s, _ := obj.Parent().Parent().LookupParent(id.Name, id.Pos()); s != nil {
+				for i, n := range slices.Backward(tv.stack) {
+					// A FuncType may be the signature of a Func{Decl,Lit} or just a func type.
+					// Any object declared within a FuncType must be a TypeParam, Param, or Result.
+					// The only reference to such an object can be within a function body.
+					// Since a func type has no function body, there can be no references to the
+					// object, and shadowing is irrelevant. So omit the modifier in that case.
+					if is[*ast.FuncType](n) {
+						switch tv.stack[i-1].(type) {
+						case *ast.FuncDecl, *ast.FuncLit:
+							return true // parameter of function with body
+						}
+						return false // parameter in a func type
+					}
+				}
+				return true
+			}
+		}
+	} else if ok {
+		// Find the scope of the symbolic variable of the type-switch header.
+		// id := foo.(type)
+		for _, n := range slices.Backward(tv.stack) {
+			if typeSwitchStmt, ok := n.(*ast.TypeSwitchStmt); ok {
+				if assign, ok := typeSwitchStmt.Assign.(*ast.AssignStmt); ok && len(assign.Lhs) != 0 {
+					if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident == id {
+						if s, _ := tv.info.Scopes[n].LookupParent(id.Name, id.Pos()); s != nil {
+							return true
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (tv *tokenVisitor) ident(id *ast.Ident) {
 	var (
 		tok  semtok.Type
@@ -633,6 +733,10 @@ func (tv *tokenVisitor) ident(id *ast.Ident) {
 		return
 	}
 
+	if tv.isShadowing(id) {
+		mods = append(mods, semtok.ModShadowing)
+	}
+
 	// Emit a token for the identifier's extent.
 	tv.token(id.Pos(), len(id.Name), tok, mods...)
 
@@ -644,32 +748,6 @@ func (tv *tokenVisitor) ident(id *ast.Ident) {
 		log.Printf(" use %s/%T/%s got %s %v (%s)",
 			id.Name, obj, q, tok, mods, tv.strStack())
 	}
-}
-
-// isParam reports whether the position is that of a parameter name of
-// an enclosing function.
-func (tv *tokenVisitor) isParam(pos token.Pos) bool {
-	for i := len(tv.stack) - 1; i >= 0; i-- {
-		switch n := tv.stack[i].(type) {
-		case *ast.FuncDecl:
-			for _, f := range n.Type.Params.List {
-				for _, id := range f.Names {
-					if id.Pos() == pos {
-						return true
-					}
-				}
-			}
-		case *ast.FuncLit:
-			for _, f := range n.Type.Params.List {
-				for _, id := range f.Names {
-					if id.Pos() == pos {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
 }
 
 // unkIdent handles identifiers with no types.Object (neither use nor
