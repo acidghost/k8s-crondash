@@ -6,6 +6,7 @@ package golang
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -189,7 +190,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 		if err != nil {
 			return protocol.Range{}, nil, err
 		}
-		cur, _ := pgf.Cursor.FindByPos(start, end) // can't fail
+		cur, _ := pgf.Cursor().FindByPos(start, end) // can't fail
 		if id, ok := cur.Node().(*ast.Ident); ok {
 			rng, err := pgf.NodeRange(id)
 			if err != nil {
@@ -285,7 +286,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 	}
 
 	// Find cursor for selection.
-	cur, ok := pgf.Cursor.FindByPos(posRange.Pos(), posRange.End())
+	cur, ok := pgf.Cursor().FindByPos(posRange.Pos(), posRange.End())
 	if !ok {
 		return protocol.Range{}, nil, fmt.Errorf("hover position not within file")
 	}
@@ -401,10 +402,10 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 		return protocol.Range{}, nil, err
 	}
 
-	decl, spec, field := findDeclInfo([]*ast.File{declPGF.File}, declPos) // may be nil^3
+	decl, spec, field, assign := findDeclInfo([]*ast.File{declPGF.File}, declPos) // may be nil^4
 
 	var docText string
-	if docComment := chooseDocComment(decl, spec, field); docComment != nil {
+	if docComment := chooseDocComment(declPGF, decl, spec, field, assign); docComment != nil {
 		docBuf := new(strings.Builder)
 		docBuf.WriteString(docComment.Text())
 
@@ -451,33 +452,40 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 	// By default, types.ObjectString provides a reasonable signature.
 	signature := objectString(obj, qual, declPos, declPGF.Tok, spec)
 
-	// When hovering over a reference to a promoted struct field,
+	// When hovering over a reference to a promoted struct field or method,
 	// show the implicitly selected intervening fields.
-	if obj, ok := obj.(*types.Var); ok && obj.IsField() {
+	isFieldOrMethod := false
+	switch obj := obj.(type) {
+	case *types.Var:
+		isFieldOrMethod = obj.IsField()
+	case *types.Func:
+		isFieldOrMethod = true
+	}
+
+	if isFieldOrMethod {
 		if selExpr, ok := cur.Parent().Node().(*ast.SelectorExpr); ok {
-			sel, ok := pkg.TypesInfo().Selections[selExpr]
-			if ok && len(sel.Index()) > 1 {
-				var buf bytes.Buffer
-				buf.WriteString(" // through ")
+			if sel, ok := pkg.TypesInfo().Selections[selExpr]; ok && len(sel.Index()) > 1 {
+				var s strings.Builder
+				s.WriteString(" // through ")
 				t := typesinternal.Unpointer(sel.Recv())
 				for i, index := range sel.Index()[:len(sel.Index())-1] {
+					if _, ok := t.Underlying().(*types.Struct); !ok {
+						break
+					}
 					if i > 0 {
-						buf.WriteString(", ")
+						s.WriteString(", ")
 					}
 					field := typesinternal.Unpointer(t.Underlying()).(*types.Struct).Field(index)
 					t = field.Type()
 					// Inv: fieldType is N or *N for some NamedOrAlias type N.
 					if ptr, ok := t.(*types.Pointer); ok {
-						buf.WriteString("*")
+						s.WriteString("*")
 						t = ptr.Elem()
 					}
-					// Be defensive in case of ill-typed code:
-					if named, ok := t.(typesinternal.NamedOrAlias); ok {
-						buf.WriteString(named.Obj().Name())
-					}
+					s.WriteString(types.TypeString(t, qual))
 				}
 				// Update signature to include embedded struct info.
-				signature += buf.String()
+				signature += s.String()
 			}
 		}
 	}
@@ -700,9 +708,9 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 			case *types.Func:
 				sig := obj.Signature()
 				if sig.Recv() != nil {
-					tname := typeToObject(sig.Recv().Type())
-					if tname != nil { // beware typed nil
-						recv = tname
+					tnames := typeToObjects(sig.Recv().Type())
+					if len(tnames) == 1 { // beware empty slice
+						recv = tnames[0]
 					}
 				}
 			case *types.Var:
@@ -795,7 +803,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng pr
 
 // typeDeclContent returns a well formatted type definition.
 func typeDeclContent(declPGF *parsego.File, declPos token.Pos, name string) (string, *ast.TypeSpec, error) {
-	_, spec, _ := findDeclInfo([]*ast.File{declPGF.File}, declPos) // may be nil^3
+	_, spec, _, _ := findDeclInfo([]*ast.File{declPGF.File}, declPos) // may be nil^4
 	// Don't duplicate comments.
 	spec1, ok := spec.(*ast.TypeSpec)
 	if !ok {
@@ -853,7 +861,7 @@ func hoverBuiltin(ctx context.Context, snapshot *cache.Snapshot, obj types.Objec
 		comment *ast.CommentGroup
 		decl    ast.Decl
 	)
-	curIdent, _ := pgf.Cursor.FindNode(ident) // can't fail
+	curIdent, _ := pgf.Cursor().FindNode(ident) // can't fail
 	for cur := range curIdent.Enclosing() {
 		switch n := cur.Node().(type) {
 		case *ast.GenDecl:
@@ -1056,42 +1064,32 @@ func hoverConstantExpr(pgf *parsego.File, expr ast.Expr, tv types.TypeAndValue, 
 				}
 			}
 		case constant.String:
-			// Locate the unicode escape sequence under the current cursor
-			// position.
-			litOffset, err := safetoken.Offset(pgf.Tok, lit.Pos())
+			index, err := astutil.OffsetInStringLiteral(lit, posRange.Pos())
 			if err != nil {
 				return protocol.Range{}, nil, err
 			}
-			startOffset, err := safetoken.Offset(pgf.Tok, posRange.Pos())
+			// pos is the point in the literal where the current rune starts.
+			pos, err := astutil.PosInStringLiteral(lit, index)
 			if err != nil {
 				return protocol.Range{}, nil, err
 			}
-			for i := startOffset - litOffset; i > 0; i-- {
-				// Start at the cursor position and search backward for the beginning of a rune escape sequence.
-				rr, _ := utf8.DecodeRuneInString(lit.Value[i:])
-				if rr == utf8.RuneError {
-					return protocol.Range{}, nil, fmt.Errorf("rune error")
-				}
-				if rr == '\\' {
-					// Got the beginning, decode it.
-					rr, _, tail, err := strconv.UnquoteChar(lit.Value[i:], '"')
-					if err != nil {
-						// If the conversion fails, it's because of an invalid
-						// syntax, therefore is no rune to be found.
-						return protocol.Range{}, nil, nil
-					}
-					// Only the rune escape sequence part of the string has to
-					// be highlighted, recompute the range.
-					runeLen := len(lit.Value) - (i + len(tail))
-					pStart := token.Pos(int(lit.Pos()) + i)
-					pEnd := token.Pos(int(pStart) + runeLen)
 
-					if pEnd >= posRange.End() {
-						start, end = pStart, pEnd
-						r = rr
-					}
-					break
+			rest, err := pgf.PosText(pos, lit.End())
+			if err != nil {
+				return protocol.Range{}, nil, err
+			}
+
+			// Is the selected character denoted by an escape sequence?
+			if bytes.HasPrefix(rest, []byte(`\`)) {
+				rr, _, tail, err := strconv.UnquoteChar(string(rest), lit.Value[0])
+				if err != nil {
+					return protocol.Range{}, nil, err
 				}
+
+				rawSize := len(rest) - len(tail)
+
+				start, end = pos, pos+token.Pos(rawSize)
+				r = rr
 			}
 		default:
 			panic("unexpected constant.Kind")
@@ -1360,11 +1358,31 @@ func HoverDocForObject(ctx context.Context, snapshot *cache.Snapshot, fset *toke
 		return nil, fmt.Errorf("re-parsing: %v", err)
 	}
 
-	decl, spec, field := findDeclInfo([]*ast.File{pgf.File}, pos)
-	return chooseDocComment(decl, spec, field), nil
+	decl, spec, field, assign := findDeclInfo([]*ast.File{pgf.File}, pos)
+	return chooseDocComment(pgf, decl, spec, field, assign), nil
 }
 
-func chooseDocComment(decl ast.Decl, spec ast.Spec, field *ast.Field) *ast.CommentGroup {
+// chooseDocComment returns the best doc comment for the given declaration
+// information.
+func chooseDocComment(pgf *parsego.File, decl ast.Decl, spec ast.Spec, field *ast.Field, assign *ast.AssignStmt) *ast.CommentGroup {
+	if assign != nil {
+		// AssignStmt lacks a Doc field; locate the comment on the line above.
+		tokFile := pgf.Tok
+		compare := func(cg *ast.CommentGroup, line int) int {
+			return cmp.Compare(safetoken.Line(tokFile, cg.End()), line-1)
+		}
+		assignLine := safetoken.Line(tokFile, assign.Pos())
+		i, found := slices.BinarySearchFunc(pgf.File.Comments, assignLine, compare)
+		if found {
+			// The comment must start at the beginning of the line, otherwise it may
+			// be a comment on a previous assignment.
+			comment := pgf.File.Comments[i]
+			lineStart := pgf.Tok.LineStart(safetoken.Position(tokFile, comment.Pos()).Line)
+			if comment.Pos()-lineStart <= 1 {
+				return comment
+			}
+		}
+	}
 	if field != nil {
 		if field.Doc != nil {
 			return field.Doc
@@ -1523,7 +1541,7 @@ func formatHover(h *hoverResult, options *settings.Options, pkgURL func(path Pac
 				if part == "" {
 					continue
 				}
-				// When markdown is a available, insert an hline before the start of
+				// When markdown is available, insert an hline before the start of
 				// the section, if there is content above.
 				if markdown && b.Len() == start && start > 0 {
 					newline()
@@ -1654,23 +1672,24 @@ func formatLink(h *hoverResult, options *settings.Options, pkgURL func(path Pack
 // types.Object with position pos, searching the given list of file syntax
 // trees.
 //
-// Pos may be the position of the name-defining identifier in a FuncDecl,
-// ValueSpec, TypeSpec, Field, or as a special case the position of
+// Pos may be the position of the name-defining identifier in an AssignStmt,
+// FuncDecl, ValueSpec, TypeSpec, Field, or as a special case the position of
 // Ellipsis.Elt in an ellipsis field.
 //
-// If found, the resulting decl, spec, and field will be the inner-most
+// If found, the resulting decl, spec, field and assign will be the inner-most
 // instance of each node type surrounding pos.
 //
 // If field is non-nil, pos is the position of a field Var. If field is nil and
 // spec is non-nil, pos is the position of a Var, Const, or TypeName object. If
 // both field and spec are nil and decl is non-nil, pos is the position of a
-// Func object.
+// Func object. If assign is non-nil, pos is the position of the assignment of a
+// function literal.
 //
 // It returns a nil decl if no object-defining node is found at pos.
 //
 // TODO(rfindley): this function has tricky semantics, and may be worth unit
 // testing and/or refactoring.
-func findDeclInfo(files []*ast.File, pos token.Pos) (decl ast.Decl, spec ast.Spec, field *ast.Field) {
+func findDeclInfo(files []*ast.File, pos token.Pos) (decl ast.Decl, spec ast.Spec, field *ast.Field, assign *ast.AssignStmt) {
 	found := false
 
 	// Visit the files in search of the node at pos.
@@ -1688,10 +1707,21 @@ func findDeclInfo(files []*ast.File, pos token.Pos) (decl ast.Decl, spec ast.Spe
 		}
 
 		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) != 1 {
+				return false
+			}
+			lhs := n.Lhs[0]
+			if lhs.Pos() == pos {
+				assign = n
+				found = true
+				return false
+			}
+
 		case *ast.Field:
 			findEnclosingDeclAndSpec := func() {
-				for i := len(stack) - 1; i >= 0; i-- {
-					switch n := stack[i].(type) {
+				for _, n := range slices.Backward(stack) {
+					switch n := n.(type) {
 					case ast.Spec:
 						spec = n
 					case ast.Decl:
@@ -1767,11 +1797,11 @@ func findDeclInfo(files []*ast.File, pos token.Pos) (decl ast.Decl, spec ast.Spe
 	for _, file := range files {
 		ast.PreorderStack(file, stack, f)
 		if found {
-			return decl, spec, field
+			return decl, spec, field, assign
 		}
 	}
 
-	return nil, nil, nil
+	return nil, nil, nil, nil
 }
 
 type promotedField struct {

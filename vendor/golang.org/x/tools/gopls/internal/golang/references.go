@@ -35,15 +35,15 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/cursorutil"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
-	"golang.org/x/tools/internal/astutil"
+
 	"golang.org/x/tools/internal/event"
 )
 
 // References returns a list of all references (sorted with
 // definitions before uses) to the object denoted by the identifier at
 // the given file/position, searching the entire workspace.
-func References(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp protocol.Position, includeDeclaration bool) ([]protocol.Location, error) {
-	references, err := references(ctx, snapshot, fh, pp, includeDeclaration)
+func References(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range, includeDeclaration bool) ([]protocol.Location, error) {
+	references, err := references(ctx, snapshot, fh, rng, includeDeclaration)
 	if err != nil {
 		return nil, err
 	}
@@ -65,12 +65,12 @@ type reference struct {
 // references returns a list of all references (sorted with
 // definitions before uses) to the object denoted by the identifier at
 // the given file/position, searching the entire workspace.
-func references(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, pp protocol.Position, includeDeclaration bool) ([]reference, error) {
+func references(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, rng protocol.Range, includeDeclaration bool) ([]reference, error) {
 	ctx, done := event.Start(ctx, "golang.references")
 	defer done()
 
 	// Is the cursor within the package name declaration?
-	_, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, pp)
+	_, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, rng)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func references(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, pp
 	if inPackageName {
 		refs, err = packageReferences(ctx, snapshot, f.URI())
 	} else {
-		refs, err = ordinaryReferences(ctx, snapshot, f.URI(), pp)
+		refs, err = ordinaryReferences(ctx, snapshot, f.URI(), rng)
 	}
 	if err != nil {
 		return nil, err
@@ -215,7 +215,7 @@ func packageReferences(ctx context.Context, snapshot *cache.Snapshot, uri protoc
 }
 
 // ordinaryReferences computes references for all ordinary objects (not package declarations).
-func ordinaryReferences(ctx context.Context, snapshot *cache.Snapshot, uri protocol.DocumentURI, pp protocol.Position) ([]reference, error) {
+func ordinaryReferences(ctx context.Context, snapshot *cache.Snapshot, uri protocol.DocumentURI, rng protocol.Range) ([]reference, error) {
 	// Strategy: use the reference information computed by the
 	// type checker to find the declaration. First type-check this
 	// package to find the declaration, then type check the
@@ -234,11 +234,11 @@ func ordinaryReferences(ctx context.Context, snapshot *cache.Snapshot, uri proto
 
 	// Find the selected object (declaration or reference).
 	// For struct{T}, we choose the field (Def) over the type (Use).
-	pos, err := pgf.PositionPos(pp)
+	start, end, err := pgf.RangePos(rng)
 	if err != nil {
 		return nil, err
 	}
-	cur, _ := pgf.Cursor.FindByPos(pos, pos) // can't fail
+	cur, _ := pgf.Cursor().FindByPos(start, end) // can't fail
 
 	candidates, err := objectsAt(pkg.TypesInfo(), cur)
 	if err != nil {
@@ -414,7 +414,7 @@ func ordinaryReferences(ctx context.Context, snapshot *cache.Snapshot, uri proto
 			if err != nil {
 				return err
 			}
-			cur, _ := pgf.Cursor.FindByPos(pos, pos) // can't fail
+			cur, _ := pgf.Cursor().FindByPos(pos, pos) // can't fail
 
 			objects, err := objectsAt(pkg.TypesInfo(), cur)
 			if err != nil {
@@ -599,10 +599,20 @@ func localReferences(pkg *cache.Package, targets map[types.Object]bool, correspo
 		return false
 	}
 
+	// Collect target names for fast pre-filtering:
+	// skip identifiers whose name can't match any target.
+	targetNames := make(map[string]struct{}, len(targets))
+	for obj := range targets {
+		targetNames[obj.Name()] = struct{}{}
+	}
+
 	// Scan through syntax looking for uses of one of the target objects.
 	for _, pgf := range pkg.CompiledGoFiles() {
-		for curId := range pgf.Cursor.Preorder((*ast.Ident)(nil)) {
+		for curId := range pgf.Cursor().Preorder((*ast.Ident)(nil)) {
 			id := curId.Node().(*ast.Ident)
+			if _, ok := targetNames[id.Name]; !ok {
+				continue
+			}
 			if obj, ok := pkg.TypesInfo().Uses[id]; ok && matches(obj) {
 				report(mustLocation(pgf, id), false)
 			}
@@ -644,7 +654,7 @@ func objectsAt(info *types.Info, cur inspector.Cursor) ([]objectAt, error) {
 
 	// Within an ImportSpec, return the PkgName
 	// and its .Name (if explicit) or the spec if not.
-	if astutil.IsChildOf(cur, edge.ImportSpec_Path) {
+	if cur.ParentEdgeKind() == edge.ImportSpec_Path {
 		cur = cur.Parent() // ImportSpec
 		spec := cur.Node().(*ast.ImportSpec)
 		pkgname := info.PkgNameOf(spec)

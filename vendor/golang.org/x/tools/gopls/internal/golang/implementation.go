@@ -54,11 +54,11 @@ import (
 //
 // If the position denotes a method, the computation is applied to its
 // receiver type and then its corresponding methods are returned.
-func Implementation(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, pp protocol.Position) ([]protocol.Location, error) {
+func Implementation(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, rng protocol.Range) ([]protocol.Location, error) {
 	ctx, done := event.Start(ctx, "golang.Implementation")
 	defer done()
 
-	locs, err := implementations(ctx, snapshot, f, pp)
+	locs, err := implementations(ctx, snapshot, f, rng)
 	if err != nil {
 		return nil, err
 	}
@@ -67,20 +67,20 @@ func Implementation(ctx context.Context, snapshot *cache.Snapshot, f file.Handle
 	return locs, nil
 }
 
-func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp protocol.Position) ([]protocol.Location, error) {
+func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range) ([]protocol.Location, error) {
 	// Type check the current package.
 	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return nil, err
 	}
-	pos, err := pgf.PositionPos(pp)
+	start, end, err := pgf.RangePos(rng)
 	if err != nil {
 		return nil, err
 	}
-	cur, _ := pgf.Cursor.FindByPos(pos, pos) // can't fail
+	cur, _ := pgf.Cursor().FindByPos(start, end) // can't fail
 
 	// Find implementations based on func signatures.
-	if locs, err := implFuncs(pkg, cur, pos); err != errNotHandled {
+	if locs, err := implFuncs(pkg, cur, start, end); err != errNotHandled {
 		return locs, err
 	}
 
@@ -111,7 +111,7 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 type implYieldFunc func(pkgpath metadata.PackagePath, name string, abstract bool, loc protocol.Location)
 
 // implementationsMsets computes implementations of the type at the
-// position specifed by cur, by method sets.
+// position specified by cur, by method sets.
 //
 // rel specifies the desired direction of the relation: Subtype,
 // Supertype, or both. As a special case, zero means infer the
@@ -206,14 +206,33 @@ func implementationsMsets(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 		pkgPath = PackagePath(obj.Pkg().Path())
 	}
 	for _, mp := range globalMetas {
-		if mp.PkgPath == pkgPath {
-			continue // declaring package is handled by local implementation
-		}
 		globalIDs = append(globalIDs, mp.ID)
 	}
 	indexes, err := snapshot.MethodSets(ctx, globalIDs...)
 	if err != nil {
 		return fmt.Errorf("querying method sets: %v", err)
+	}
+
+	// For method queries, results may include methods promoted via
+	// embedding from another package, whose positions are not stored
+	// in the index (see methodsets.Result.Location). Build a map of
+	// indexes by package path so we can resolve such positions in the
+	// declaring package's index.
+	//
+	// Type queries always return positions of types in the indexed
+	// package itself, so this map is not needed.
+	//
+	// Only non-test variants are included: a promoted method's
+	// declaring package is the one that was imported, and test
+	// variants are not importable.
+	var byPkgPath map[PackagePath]*methodsets.Index
+	if queryMethod != nil {
+		byPkgPath = make(map[PackagePath]*methodsets.Index, len(indexes))
+		for i, index := range indexes {
+			if globalMetas[i].ForTest == "" {
+				byPkgPath[index.PkgPath] = index
+			}
+		}
 	}
 
 	// Search local and global packages in parallel.
@@ -239,7 +258,7 @@ func implementationsMsets(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 			if err != nil {
 				return err // also "can't happen"
 			}
-			curIdent, ok := declFile.Cursor.FindByPos(pos, pos)
+			curIdent, ok := declFile.Cursor().FindByPos(pos, pos)
 			if !ok {
 				return bug.Errorf("position not within file") // can't happen
 			}
@@ -255,9 +274,30 @@ func implementationsMsets(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 	}
 	// global search
 	for _, index := range indexes {
+		if index.PkgPath == pkgPath {
+			continue // declaring package is handled by local implementation
+		}
 		group.Go(func() error {
 			for _, res := range index.Search(key, rel, queryMethod) {
 				loc := res.Location
+				if loc.Filename == "" {
+					// Method promoted from another package via
+					// embedding: resolve its position from the
+					// declaring package's index.
+					if declIdx, ok := byPkgPath[PackagePath(res.PkgPath)]; ok {
+						loc, _ = declIdx.LocationOf(res.ObjectPath)
+					}
+					if loc.Filename == "" {
+						// The declaring package wasn't in
+						// AllMetadata, or the method isn't in
+						// its index (e.g., unexported receiver
+						// type that isn't package-level).
+						// Neither should occur for a method
+						// promoted into a package-level type.
+						bug.Reportf("methodsets: no location for %s.%s", res.PkgPath, res.ObjectPath)
+						continue
+					}
+				}
 				// Map offsets to protocol.Locations in parallel (may involve I/O).
 				group.Go(func() error {
 					ploc, err := offsetToLocation(ctx, snapshot, loc.Filename, loc.Start, loc.End)
@@ -395,7 +435,7 @@ func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 
 	// Scan through all type declarations in the syntax.
 	for _, pgf := range pkg.CompiledGoFiles() {
-		for cur := range pgf.Cursor.Preorder((*ast.TypeSpec)(nil)) {
+		for cur := range pgf.Cursor().Preorder((*ast.TypeSpec)(nil)) {
 			spec := cur.Node().(*ast.TypeSpec)
 			if spec.Name == id {
 				continue // avoid self-comparison of query type
@@ -890,7 +930,7 @@ var (
 //
 // implFuncs returns errNotHandled to indicate that we should try the
 // regular method-sets algorithm.
-func implFuncs(pkg *cache.Package, curSel inspector.Cursor, pos token.Pos) ([]protocol.Location, error) {
+func implFuncs(pkg *cache.Package, curSel inspector.Cursor, start, end token.Pos) ([]protocol.Location, error) {
 	info := pkg.TypesInfo()
 	if info.Types == nil || info.Defs == nil || info.Uses == nil {
 		panic("one of info.Types, .Defs or .Uses is nil")
@@ -918,7 +958,7 @@ func implFuncs(pkg *cache.Package, curSel inspector.Cursor, pos token.Pos) ([]pr
 	) {
 		switch n := cur.Node().(type) {
 		case *ast.FuncDecl, *ast.FuncLit:
-			if inToken(n.Pos(), "func", pos) {
+			if inToken(n.Pos(), "func", start, end) {
 				// Case 1: concrete function declaration.
 				// Report uses of corresponding function types.
 				switch n := n.(type) {
@@ -930,14 +970,14 @@ func implFuncs(pkg *cache.Package, curSel inspector.Cursor, pos token.Pos) ([]pr
 			}
 
 		case *ast.FuncType:
-			if n.Func.IsValid() && inToken(n.Func, "func", pos) && !beneathFuncDef(cur) {
+			if n.Func.IsValid() && inToken(n.Func, "func", start, end) && !beneathFuncDef(cur) {
 				// Case 2a: function type.
 				// Report declarations of corresponding concrete functions.
 				return funcDefs(pkg, info.TypeOf(n))
 			}
 
 		case *ast.CallExpr:
-			if inToken(n.Lparen, "(", pos) {
+			if inToken(n.Lparen, "(", start, end) {
 				t := dynamicFuncCallType(info, n)
 				if t == nil {
 					return nil, fmt.Errorf("not a dynamic function call")
@@ -963,7 +1003,7 @@ func funcUses(pkg *cache.Package, t types.Type) ([]protocol.Location, error) {
 
 	// local search
 	for _, pgf := range pkg.CompiledGoFiles() {
-		for cur := range pgf.Cursor.Preorder((*ast.CallExpr)(nil), (*ast.FuncType)(nil)) {
+		for cur := range pgf.Cursor().Preorder((*ast.CallExpr)(nil), (*ast.FuncType)(nil)) {
 			var pos, end token.Pos
 			var ftyp types.Type
 			switch n := cur.Node().(type) {
@@ -1003,7 +1043,7 @@ func funcDefs(pkg *cache.Package, t types.Type) ([]protocol.Location, error) {
 
 	// local search
 	for _, pgf := range pkg.CompiledGoFiles() {
-		for curFn := range pgf.Cursor.Preorder((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
+		for curFn := range pgf.Cursor().Preorder((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
 			fn := curFn.Node()
 			var ftyp types.Type
 			switch fn := fn.(type) {
@@ -1039,7 +1079,7 @@ func funcDefs(pkg *cache.Package, t types.Type) ([]protocol.Location, error) {
 // beneathFuncDef reports whether the specified FuncType cursor is a
 // child of Func{Decl,Lit}.
 func beneathFuncDef(cur inspector.Cursor) bool {
-	switch ek, _ := cur.ParentEdge(); ek {
+	switch cur.ParentEdgeKind() {
 	case edge.FuncDecl_Type, edge.FuncLit_Type:
 		return true
 	}
@@ -1059,8 +1099,8 @@ func dynamicFuncCallType(info *types.Info, call *ast.CallExpr) types.Type {
 	return nil
 }
 
-// inToken reports whether pos is within the token of
+// inToken reports whether (start, end) is within the token of
 // the specified position and string.
-func inToken(tokPos token.Pos, tokStr string, pos token.Pos) bool {
-	return tokPos <= pos && pos <= tokPos+token.Pos(len(tokStr))
+func inToken(tokPos token.Pos, tokStr string, start, end token.Pos) bool {
+	return tokPos <= start && end <= tokPos+token.Pos(len(tokStr))
 }

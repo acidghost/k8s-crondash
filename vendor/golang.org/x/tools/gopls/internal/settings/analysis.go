@@ -23,6 +23,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/defers"
 	"golang.org/x/tools/go/analysis/passes/directive"
 	"golang.org/x/tools/go/analysis/passes/errorsas"
+	"golang.org/x/tools/go/analysis/passes/fieldalignment"
 	"golang.org/x/tools/go/analysis/passes/framepointer"
 	"golang.org/x/tools/go/analysis/passes/hostport"
 	"golang.org/x/tools/go/analysis/passes/httpresponse"
@@ -34,6 +35,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/nilfunc"
 	"golang.org/x/tools/go/analysis/passes/nilness"
 	"golang.org/x/tools/go/analysis/passes/printf"
+	"golang.org/x/tools/go/analysis/passes/scannererr"
 	"golang.org/x/tools/go/analysis/passes/shadow"
 	"golang.org/x/tools/go/analysis/passes/shift"
 	"golang.org/x/tools/go/analysis/passes/sigchanyzer"
@@ -54,6 +56,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/waitgroup"
 	"golang.org/x/tools/gopls/internal/analysis/deprecated"
 	"golang.org/x/tools/gopls/internal/analysis/embeddirective"
+	"golang.org/x/tools/gopls/internal/analysis/errorsastype"
 	"golang.org/x/tools/gopls/internal/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/analysis/infertypeargs"
 	"golang.org/x/tools/gopls/internal/analysis/maprange"
@@ -66,6 +69,7 @@ import (
 	"golang.org/x/tools/gopls/internal/analysis/unusedfunc"
 	"golang.org/x/tools/gopls/internal/analysis/unusedparams"
 	"golang.org/x/tools/gopls/internal/analysis/unusedvariable"
+	"golang.org/x/tools/gopls/internal/analysis/writestring"
 	"golang.org/x/tools/gopls/internal/analysis/yield"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/internal/goplsexport"
@@ -211,13 +215,15 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: yield.Analyzer},   // uses go/ssa
 	{analyzer: sortslice.Analyzer},
 	{analyzer: embeddirective.Analyzer},
+	{analyzer: scannererr.Analyzer},    // to appear in cmd/vet@go1.27
 	{analyzer: waitgroup.Analyzer},     // to appear in cmd/vet@go1.25
 	{analyzer: hostport.Analyzer},      // to appear in cmd/vet@go1.25
 	{analyzer: recursiveiter.Analyzer}, // under evaluation
+	{analyzer: writestring.Analyzer},
 
 	// disabled due to high false positives
-	{analyzer: shadow.Analyzer, severity: protocol.SeverityHint, nonDefault: true}, // very noisy
-	// fieldalignment is not even off-by-default; see #67762.
+	{analyzer: shadow.Analyzer, severity: protocol.SeverityHint, nonDefault: true},         // very noisy
+	{analyzer: fieldalignment.Analyzer, severity: protocol.SeverityHint, nonDefault: true}, // #67762, #76237
 
 	// simplifiers and modernizers
 	//
@@ -251,28 +257,30 @@ var DefaultAnalyzers = []*Analyzer{
 	// the modernize suite
 	{analyzer: modernize.AnyAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.AppendClippedAnalyzer, severity: protocol.SeverityHint, nonDefault: true}, // not nil-preserving
+	{analyzer: modernize.AtomicTypesAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.BLoopAnalyzer, severity: protocol.SeverityHint},
-	{analyzer: goplsexport.ErrorsAsTypeModernizer, severity: protocol.SeverityHint},
+	{analyzer: modernize.EmbedLitAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: modernize.ErrorsAsTypeAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.FmtAppendfAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.ForVarAnalyzer, severity: protocol.SeverityHint},
-	{analyzer: goplsexport.PlusBuildModernizer, severity: protocol.SeverityHint},
-	{analyzer: goplsexport.StdIteratorsModernizer, severity: protocol.SeverityHint},
 	{analyzer: modernize.MapsLoopAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.MinMaxAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.NewExprAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.OmitZeroAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: modernize.PlusBuildAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.RangeIntAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.ReflectTypeForAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.SlicesContainsAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.SlicesDeleteAnalyzer, severity: protocol.SeverityHint, nonDefault: true}, // not nil-preserving
 	{analyzer: modernize.SlicesSortAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: modernize.StdIteratorsAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.StringsBuilderAnalyzer, severity: protocol.SeverityHint},
-	{analyzer: goplsexport.StringsCutModernizer, severity: protocol.SeverityHint},
+	{analyzer: modernize.StringsCutAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.StringsCutPrefixAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.StringsSeqAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.TestingContextAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: goplsexport.UnsafeFuncsModernizer, severity: protocol.SeverityHint},
-	{analyzer: modernize.WaitGroupAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: modernize.WaitGroupGoAnalyzer, severity: protocol.SeverityHint},
 
 	// type-error analyzers
 	// These analyzers enrich go/types errors with suggested fixes.
@@ -282,6 +290,8 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: nonewvars.Analyzer},
 	{analyzer: noresultvalues.Analyzer},
 	{analyzer: unusedvariable.Analyzer},
+
+	{analyzer: errorsastype.Analyzer},
 }
 
 func init() {

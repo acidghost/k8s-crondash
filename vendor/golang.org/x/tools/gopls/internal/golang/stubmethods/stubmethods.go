@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/internal/typesinternal"
 
 	"golang.org/x/tools/gopls/internal/cache/parsego"
-	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/typesutil"
 )
 
@@ -40,7 +39,7 @@ type IfaceStubInfo struct {
 	Fset      *token.FileSet // the FileSet used to type-check the types below
 	Interface *types.TypeName
 	Concrete  typesinternal.NamedOrAlias
-	pointer   bool
+	Pointer   bool
 }
 
 // GetIfaceStubInfo determines whether the "missing method error"
@@ -53,11 +52,10 @@ type IfaceStubInfo struct {
 // more generally. Refactor to share logic, after auditing 'satisfy'
 // for safety on ill-typed code.
 func GetIfaceStubInfo(fset *token.FileSet, info *types.Info, pgf *parsego.File, pos, end token.Pos) *IfaceStubInfo {
-	cur, _ := pgf.Cursor.FindByPos(pos, end)
+	cur, _ := pgf.Cursor().FindByPos(pos, end)
 	for cur := range cur.Enclosing() {
 		// TODO: do cur = unparenEnclosing(cur) first, once CL 701035 lands.
-		ek, _ := cur.ParentEdge()
-		switch ek {
+		switch cur.ParentEdgeKind() {
 		case edge.ValueSpec_Values:
 			return fromValueSpec(fset, info, cur)
 		case edge.ReturnStmt_Results:
@@ -94,23 +92,16 @@ func (si *IfaceStubInfo) Emit(out *bytes.Buffer, qual types.Qualifier) error {
 		}
 	}
 
-	// Find subset of interface methods that the concrete type lacks.
-	ifaceType := si.Interface.Type().Underlying().(*types.Interface)
-
-	type missingFn struct {
-		fn         *types.Func
-		needSubtle string
-	}
-
 	var (
-		missing                  []missingFn
-		concreteStruct, isStruct = typesinternal.Origin(si.Concrete).Underlying().(*types.Struct)
+		missing []*types.Func
+		// Find subset of interface methods that the concrete type lacks.
+		ifaceType = si.Interface.Type().Underlying().(*types.Interface)
 	)
 
 	for imethod := range ifaceType.Methods() {
-		cmethod, index, _ := types.LookupFieldOrMethod(si.Concrete, si.pointer, imethod.Pkg(), imethod.Name())
+		cmethod, index, _ := types.LookupFieldOrMethod(si.Concrete, si.Pointer, imethod.Pkg(), imethod.Name())
 		if cmethod == nil {
-			missing = append(missing, missingFn{fn: imethod})
+			missing = append(missing, imethod)
 			continue
 		}
 
@@ -128,19 +119,19 @@ func (si *IfaceStubInfo) Emit(out *bytes.Buffer, qual types.Qualifier) error {
 			continue
 		}
 
-		mf := missingFn{fn: imethod}
-		if isStruct && len(index) > 0 {
-			field := concreteStruct.Field(index[0])
-
-			fn := field.Name()
-			if _, ok := field.Type().(*types.Pointer); ok {
-				fn = "*" + fn
-			}
-
-			mf.needSubtle = fmt.Sprintf("// Subtle: this method shadows the method (%s).%s of %s.%s.\n", fn, imethod.Name(), si.Concrete.Obj().Name(), field.Name())
+		if len(index) > 0 {
+			// len(index) > 0 implies that the current method is already
+			// implemented on some embedded object.
+			// Do not generate a method if it would result in shadowing, but
+			// continue generating other parts of the stub.
+			// For example, if some struct A partially implements an interface I
+			// and another struct B embeds A, we should not implement methods on
+			// B that are already implemented on A, as these would be shadowed
+			// methods.
+			continue
 		}
 
-		missing = append(missing, mf)
+		missing = append(missing, imethod)
 	}
 	if len(missing) == 0 {
 		return fmt.Errorf("no missing methods found")
@@ -154,7 +145,7 @@ func (si *IfaceStubInfo) Emit(out *bytes.Buffer, qual types.Qualifier) error {
 
 	// Pointer receiver?
 	var star string
-	if si.pointer {
+	if si.Pointer {
 		star = "*"
 	}
 
@@ -182,25 +173,24 @@ func (si *IfaceStubInfo) Emit(out *bytes.Buffer, qual types.Qualifier) error {
 
 	for index := range missing {
 		mrn := rn + " "
-		sig := missing[index].fn.Signature()
+		sig := missing[index].Signature()
 		if checkRecvName(sig.Params()) || checkRecvName(sig.Results()) {
 			mrn = ""
 		}
 
 		fmt.Fprintf(out, `// %s implements [%s].
-%sfunc (%s%s%s%s) %s%s {
+func (%s%s%s%s) %s%s {
 	panic("unimplemented")
 }
 `,
-			missing[index].fn.Name(),
+			missing[index].Name(),
 			iface,
-			missing[index].needSubtle,
 			mrn,
 			star,
 			si.Concrete.Obj().Name(),
 			typesutil.FormatTypeParams(si.Concrete.TypeParams()),
-			missing[index].fn.Name(),
-			strings.TrimPrefix(types.TypeString(missing[index].fn.Type(), qual), "func"))
+			missing[index].Name(),
+			strings.TrimPrefix(types.TypeString(missing[index].Type(), qual), "func"))
 	}
 	return nil
 }
@@ -226,7 +216,7 @@ func fromCallExpr(fset *token.FileSet, info *types.Info, curCallArg inspector.Cu
 		return nil
 	}
 
-	_, argIdx := curCallArg.ParentEdge()
+	argIdx := curCallArg.ParentEdgeIndex()
 	var paramType types.Type
 	if sig.Variadic() && argIdx >= sig.Params().Len()-1 {
 		v := sig.Params().At(sig.Params().Len() - 1)
@@ -246,7 +236,7 @@ func fromCallExpr(fset *token.FileSet, info *types.Info, curCallArg inspector.Cu
 	return &IfaceStubInfo{
 		Fset:      fset,
 		Concrete:  concType,
-		pointer:   pointer,
+		Pointer:   pointer,
 		Interface: iface,
 	}
 }
@@ -270,8 +260,12 @@ func fromReturnStmt(fset *token.FileSet, info *types.Info, curResult inspector.C
 
 	sig := typesutil.EnclosingSignature(curResult, info)
 	if sig == nil {
-		// golang/go#70666: this bug may be reached in practice.
-		return nil, bug.Errorf("could not find the enclosing function of the return statement")
+		// Either curResult is not within a function (incontheivable?),
+		// or the function's type information is missing (in which case
+		// EnclosingSignature will have called bug.Report).
+		// Don't report a second bug here.
+		// See https://go.dev/issue/70666.
+		return nil, fmt.Errorf("internal error: return statement lacks type information or enclosing function (issue 70666)")
 	}
 	rets := sig.Results()
 	// The return operands and function results must match.
@@ -282,15 +276,14 @@ func fromReturnStmt(fset *token.FileSet, info *types.Info, curResult inspector.C
 			len(ret.Results),
 			rets.Len())
 	}
-	_, resultIdx := curResult.ParentEdge()
-	iface := ifaceObjFromType(rets.At(resultIdx).Type())
+	iface := ifaceObjFromType(rets.At(curResult.ParentEdgeIndex()).Type())
 	if iface == nil {
 		return nil, nil
 	}
 	return &IfaceStubInfo{
 		Fset:      fset,
 		Concrete:  concType,
-		pointer:   pointer,
+		Pointer:   pointer,
 		Interface: iface,
 	}, nil
 }
@@ -326,7 +319,7 @@ func fromValueSpec(fset *token.FileSet, info *types.Info, curValue inspector.Cur
 		Fset:      fset,
 		Concrete:  concType,
 		Interface: ifaceObj,
-		pointer:   pointer,
+		Pointer:   pointer,
 	}
 }
 
@@ -341,8 +334,7 @@ func fromAssignStmt(fset *token.FileSet, info *types.Info, curRhs inspector.Curs
 	//          ^^^^
 
 	assign := curRhs.Parent().Node().(*ast.AssignStmt)
-	_, idx := curRhs.ParentEdge()
-	lhs, rhs := assign.Lhs[idx], curRhs.Node().(ast.Expr)
+	lhs, rhs := assign.Lhs[curRhs.ParentEdgeIndex()], curRhs.Node().(ast.Expr)
 
 	ifaceObj := ifaceType(lhs, info)
 	if ifaceObj == nil {
@@ -360,7 +352,7 @@ func fromAssignStmt(fset *token.FileSet, info *types.Info, curRhs inspector.Curs
 		Fset:      fset,
 		Concrete:  concType,
 		Interface: ifaceObj,
-		pointer:   pointer,
+		Pointer:   pointer,
 	}
 }
 

@@ -88,7 +88,7 @@ func canSplitJoinLines(items []ast.Node, comments []*ast.CommentGroup) bool {
 // splitLines is a singleFile fixer.
 func splitLines(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (*token.FileSet, *analysis.SuggestedFix, error) {
 	fset := pkg.FileSet()
-	itemType, items, comments, indent, braceOpen, braceClose := findSplitJoinTarget(fset, pgf.Cursor, pgf.Src, start, end)
+	itemType, items, comments, indent, braceOpen, braceClose := findSplitJoinTarget(fset, pgf.Cursor(), pgf.Src, start, end)
 	if itemType == "" {
 		return nil, nil, nil // no fix available
 	}
@@ -99,7 +99,7 @@ func splitLines(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (*t
 // joinLines is a singleFile fixer.
 func joinLines(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (*token.FileSet, *analysis.SuggestedFix, error) {
 	fset := pkg.FileSet()
-	itemType, items, comments, _, braceOpen, braceClose := findSplitJoinTarget(fset, pgf.Cursor, pgf.Src, start, end)
+	itemType, items, comments, _, braceOpen, braceClose := findSplitJoinTarget(fset, pgf.Cursor(), pgf.Src, start, end)
 	if itemType == "" {
 		return nil, nil, nil // no fix available
 	}
@@ -176,8 +176,7 @@ func findSplitJoinTarget(fset *token.FileSet, curFile inspector.Cursor, src []by
 		cur, _ := curFile.FindByPos(start, end)
 		for cur := range cur.Enclosing() {
 			// TODO: do cur = enclosingUnparen(cur) first, once CL 701035 lands.
-			ek, _ := cur.ParentEdge()
-			switch ek {
+			switch cur.ParentEdgeKind() {
 			// params or results of func signature
 			// Note:
 			// - each ast.Field (e.g. "x, y, z int") is considered a single item.

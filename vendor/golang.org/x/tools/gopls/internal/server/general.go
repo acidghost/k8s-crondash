@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,9 @@ import (
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/debug"
 	debuglog "golang.org/x/tools/gopls/internal/debug/log"
+	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/filecache"
+	"golang.org/x/tools/gopls/internal/filewatcher"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/semtok"
 	"golang.org/x/tools/gopls/internal/settings"
@@ -34,6 +38,7 @@ import (
 	"golang.org/x/tools/gopls/internal/util/moreslices"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
+	"golang.org/x/tools/internal/xcontext"
 )
 
 func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
@@ -66,6 +71,10 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 		s.handleOptionResult(ctx, res, errs)
 	}
 	options.ForClientCapabilities(params.ClientInfo, params.Capabilities)
+
+	if options.MaxFileCacheBytes > 0 {
+		filecache.SetBudget(options.MaxFileCacheBytes)
+	}
 
 	if options.ShowBugReports {
 		// Report the next bug that occurs on the server.
@@ -118,6 +127,18 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 		}
 	}
 
+	var semanticTokenProvider any
+	if options.SemanticTokens {
+		semanticTokenProvider = protocol.SemanticTokensOptions{
+			Range: &protocol.Or_SemanticTokensOptions_range{Value: true},
+			Full:  &protocol.Or_SemanticTokensOptions_full{Value: true},
+			Legend: protocol.SemanticTokensLegend{
+				TokenTypes:     moreslices.ConvertStrings[string](semtok.Types),
+				TokenModifiers: moreslices.ConvertStrings[string](semtok.Modifiers),
+			},
+		}
+	}
+
 	versionInfo := debug.VersionInfo()
 
 	goplsVersion, err := json.Marshal(versionInfo)
@@ -151,14 +172,7 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 			ReferencesProvider:        &protocol.Or_ServerCapabilities_referencesProvider{Value: true},
 			RenameProvider:            renameOpts,
 			SelectionRangeProvider:    &protocol.Or_ServerCapabilities_selectionRangeProvider{Value: true},
-			SemanticTokensProvider: protocol.SemanticTokensOptions{
-				Range: &protocol.Or_SemanticTokensOptions_range{Value: true},
-				Full:  &protocol.Or_SemanticTokensOptions_full{Value: true},
-				Legend: protocol.SemanticTokensLegend{
-					TokenTypes:     moreslices.ConvertStrings[string](semtok.TokenTypes),
-					TokenModifiers: moreslices.ConvertStrings[string](semtok.TokenModifiers),
-				},
-			},
+			SemanticTokensProvider:    semanticTokenProvider,
 			SignatureHelpProvider: &protocol.SignatureHelpOptions{
 				TriggerCharacters: []string{"(", ","},
 				// Used to update or dismiss signature help when it's already active,
@@ -187,6 +201,20 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 						}},
 					},
 				},
+			},
+			Experimental: map[string]any{
+				// interactiveResolveProvider lists the LSP objects that support
+				// an interactive resolution stage. For instance, the presence of
+				// "command" indicates that the server handles "command/resolve"
+				// requests.
+				//
+				// Due to the existence of "codeAction/resolve" and language
+				// clients that resolve code action eagerly, "codeAction" can
+				// never be interactively resolved.
+				//
+				// TODO(hxjiang): experiment with interactively resolving
+				// "RenameParams". See golang/go#69107.
+				"interactiveResolveProvider": []string{"command"},
 			},
 		},
 		ServerInfo: &protocol.ServerInfo{
@@ -274,9 +302,9 @@ func (s *server) checkViewGoVersions() {
 //
 // Copied from the testenv package.
 func go1Point() int {
-	for i := len(build.Default.ReleaseTags) - 1; i >= 0; i-- {
+	for _, tag := range slices.Backward(build.Default.ReleaseTags) {
 		var version int
-		if _, err := fmt.Sscanf(build.Default.ReleaseTags[i], "go1.%d", &version); err != nil {
+		if _, err := fmt.Sscanf(tag, "go1.%d", &version); err != nil {
 			continue
 		}
 		return version
@@ -382,12 +410,23 @@ func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 	}
 }
 
-// updateWatchedDirectories compares the current set of directories to watch
-// with the previously registered set of directories. If the set of directories
-// has changed, we unregister and re-register for file watching notifications.
-// updatedSnapshots is the set of snapshots that have been updated.
+// updateWatchedDirectories syncs the server-side file watcher and client-side
+// registrations with the current workspace patterns. If the directories to
+// watch have changed, it unregisters and re-registers client notifications.
 func (s *server) updateWatchedDirectories(ctx context.Context) error {
 	patterns := s.session.FileWatchingGlobPatterns(ctx)
+
+	// Note: Currently, the server-side watcher acts as a complement to the
+	// client-side watcher (which is registered below). This dual-watching
+	// setup is safe, though it means gopls may receive redundant file
+	// events (one from the client, one from the server-side watcher).
+	//
+	// TODO(hxjiang): If the user enables the server-side file watcher, the
+	// server can eventually skip the client-side registration entirely and
+	// rely solely on the server-side watcher to avoid this redundancy.
+	if err := s.updateServerSideWatcher(ctx, patterns); err != nil {
+		return fmt.Errorf("failed to update server-side file watcher: %w", err)
+	}
 
 	s.watchedGlobPatternsMu.Lock()
 	defer s.watchedGlobPatternsMu.Unlock()
@@ -413,6 +452,70 @@ func (s *server) updateWatchedDirectories(ctx context.Context) error {
 				Method: "workspace/didChangeWatchedFiles",
 			}},
 		})
+	}
+	return nil
+}
+
+// updateServerSideWatcher synchronizes the file watcher's lifecycle with the
+// current session settings (creating, replacing, or closing it as needed)
+// and updates the directories it monitors based on the provided patterns.
+func (s *server) updateServerSideWatcher(ctx context.Context, patterns map[protocol.RelativePattern]unit) error {
+	wantMode := s.Options().FileWatcher
+	s.fileWatcherMu.Lock()
+	defer s.fileWatcherMu.Unlock()
+
+	// Close file watcher if the file watcher is not the desired mode.
+	if s.fileWatcher != nil && s.fileWatcher.Mode() != wantMode {
+		if err := s.fileWatcher.Close(); err != nil {
+			event.Error(ctx, "failed to close the file watcher", err)
+		}
+		s.fileWatcher = nil
+	}
+
+	if wantMode == settings.FileWatcherOff {
+		return nil
+	}
+
+	// Create new file watcher based on the desired mode.
+	if s.fileWatcher == nil {
+		// TODO(hxjiang): ensure gopls don't process events after shutdown.
+		watcherCtx := xcontext.Detach(ctx)
+		onChange := func(events []protocol.FileEvent) {
+			modifications := make([]file.Modification, len(events))
+			for i, e := range events {
+				modifications[i] = file.Modification{
+					URI:    e.URI,
+					Action: changeTypeToFileAction(e.Type),
+					OnDisk: true,
+				}
+			}
+			if err := s.didModifyFiles(watcherCtx, modifications, FromDidChangeWatchedFiles); err != nil {
+				event.Error(watcherCtx, "failed to process file changes", err)
+			}
+		}
+		onErr := func(err error) {
+			event.Error(watcherCtx, "file watcher error", err)
+		}
+
+		w, err := filewatcher.New(wantMode, nil, onChange, onErr)
+		if err != nil {
+			return err
+		}
+		s.fileWatcher = w
+	}
+
+	// Inv: s.fileWatcher.Mode() == want
+	dirs := make(map[string]struct{})
+	for pattern := range patterns {
+		if pattern.BaseURI != "" {
+			dirs[pattern.BaseURI.Path()] = struct{}{}
+		}
+	}
+	for dir := range dirs {
+		if err := s.fileWatcher.WatchDir(dir); err != nil {
+			// Log warning but continue watching other directories.
+			event.Log(ctx, fmt.Sprintf("failed to watch directory %s: %v", dir, err))
+		}
 	}
 	return nil
 }
@@ -676,6 +779,7 @@ func recordClientInfo(clientName string) {
 		key = "gopls/client:helix"
 	case "Neovim":
 		// https://github.com/neovim/neovim/blob/42333ea98dfcd2994ee128a3467dfe68205154cd/runtime/lua/vim/lsp.lua#L1361
+		// https://github.com/neovim/neovim/blob/fe6026825883b44b09a8d3a03f2d49bfc8ed4725/runtime/lua/vim/lsp/client.lua#564
 		key = "gopls/client:neovim"
 	case "coc.nvim":
 		// https://github.com/neoclide/coc.nvim/blob/3dc6153a85ed0f185abec1deb972a66af3fbbfb4/src/language-client/client.ts#L994

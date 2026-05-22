@@ -42,9 +42,10 @@ const (
 	GCDetails               Command = "gopls.gc_details"
 	Generate                Command = "gopls.generate"
 	GoGetPackage            Command = "gopls.go_get_package"
-	LSP                     Command = "gopls.lsp"
+	ImplementInterface      Command = "gopls.implement_interface"
 	ListImports             Command = "gopls.list_imports"
 	ListKnownPackages       Command = "gopls.list_known_packages"
+	LSP                     Command = "gopls.lsp"
 	MaybePromptForTelemetry Command = "gopls.maybe_prompt_for_telemetry"
 	MemStats                Command = "gopls.mem_stats"
 	ModifyTags              Command = "gopls.modify_tags"
@@ -91,9 +92,10 @@ var Commands = []Command{
 	GCDetails,
 	Generate,
 	GoGetPackage,
-	LSP,
+	ImplementInterface,
 	ListImports,
 	ListKnownPackages,
+	LSP,
 	MaybePromptForTelemetry,
 	MemStats,
 	ModifyTags,
@@ -234,12 +236,12 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 			return nil, err
 		}
 		return nil, s.GoGetPackage(ctx, a0)
-	case LSP:
-		var a0 LSPArgs
+	case ImplementInterface:
+		var a0 ImplementInterfaceArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
 			return nil, err
 		}
-		return s.LSP(ctx, a0)
+		return nil, s.ImplementInterface(ctx, a0, &params.InteractiveParams)
 	case ListImports:
 		var a0 URIArg
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -252,6 +254,12 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 			return nil, err
 		}
 		return s.ListKnownPackages(ctx, a0)
+	case LSP:
+		var a0 LSPArgs
+		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
+			return nil, err
+		}
+		return s.LSP(ctx, a0)
 	case MaybePromptForTelemetry:
 		return nil, s.MaybePromptForTelemetry(ctx)
 	case MemStats:
@@ -261,7 +269,7 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
 			return nil, err
 		}
-		return nil, s.ModifyTags(ctx, a0)
+		return nil, s.ModifyTags(ctx, a0, &params.InteractiveParams)
 	case Modules:
 		var a0 ModulesArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -531,10 +539,10 @@ func NewGoGetPackageCommand(title string, a0 GoGetPackageArgs) *protocol.Command
 	}
 }
 
-func NewLSPCommand(title string, a0 LSPArgs) *protocol.Command {
+func NewImplementInterfaceCommand(title string, a0 ImplementInterfaceArgs) *protocol.Command {
 	return &protocol.Command{
 		Title:     title,
-		Command:   LSP.String(),
+		Command:   ImplementInterface.String(),
 		Arguments: MustMarshalArgs(a0),
 	}
 }
@@ -551,6 +559,14 @@ func NewListKnownPackagesCommand(title string, a0 URIArg) *protocol.Command {
 	return &protocol.Command{
 		Title:     title,
 		Command:   ListKnownPackages.String(),
+		Arguments: MustMarshalArgs(a0),
+	}
+}
+
+func NewLSPCommand(title string, a0 LSPArgs) *protocol.Command {
+	return &protocol.Command{
+		Title:     title,
+		Command:   LSP.String(),
 		Arguments: MustMarshalArgs(a0),
 	}
 }

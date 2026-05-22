@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/filecache"
 	"golang.org/x/tools/gopls/internal/golang/completion"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
@@ -82,6 +83,12 @@ func (s *server) DidChangeConfiguration(ctx context.Context, _ *protocol.DidChan
 	}
 	s.SetOptions(options)
 
+	// Delete and create file watcher based on the updated setting and watch
+	// for the desired directory.
+	if err := s.updateServerSideWatcher(ctx, s.session.FileWatchingGlobPatterns(ctx)); err != nil {
+		return fmt.Errorf("failed to update server-side file watcher: %w", err)
+	}
+
 	// Collect options for all workspace folders.
 	// If none have changed, this is a no op.
 	folderOpts := make(map[protocol.DocumentURI]*settings.Options)
@@ -136,6 +143,10 @@ func (s *server) DidChangeConfiguration(ctx context.Context, _ *protocol.DidChan
 
 	// An options change may have affected the detected Go version.
 	s.checkViewGoVersions()
+
+	if options.MaxFileCacheBytes > 0 {
+		filecache.SetBudget(options.MaxFileCacheBytes)
+	}
 
 	return nil
 }

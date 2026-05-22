@@ -17,6 +17,7 @@ import (
 	"go/types"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -141,10 +142,12 @@ func (s *Snapshot) forEachPackage(ctx context.Context, ids []PackageID, pre preT
 
 	var (
 		needIDs []PackageID // ids to type-check
-		indexes []int       // original index of requested ids
+		indexes []int       // original index of needIDs[i] in ids
+		preDone []bool      // pre was already called for needIDs[i] (and returned true)
 	)
 
-	// Check for existing active packages.
+	// Check for existing active packages, or packages that can be served
+	// from the filecache without type-checking.
 	//
 	// Since gopls can't depend on package identity, any instance of the
 	// requested package must be ok to return.
@@ -159,10 +162,19 @@ func (s *Snapshot) forEachPackage(ctx context.Context, ids []PackageID, pre preT
 		s.mu.Unlock()
 		if ok && ph.state >= validPackage {
 			post(i, ph.pkgData.pkg)
-		} else {
-			needIDs = append(needIDs, id)
-			indexes = append(indexes, i)
+			continue
 		}
+		// If the handle already has a valid key, try the pre func
+		// (typically a filecache lookup) now: on a hit we can skip
+		// this package entirely without building the dependency
+		// graph.
+		called := ok && ph.state >= validKey && pre != nil
+		if called && !pre(i, ph) {
+			continue
+		}
+		needIDs = append(needIDs, id)
+		indexes = append(indexes, i)
+		preDone = append(preDone, called)
 	}
 
 	if len(needIDs) == 0 {
@@ -177,10 +189,14 @@ func (s *Snapshot) forEachPackage(ctx context.Context, ids []PackageID, pre preT
 		return err
 	}
 
-	// Wrap the pre- and post- funcs to translate indices.
+	// Wrap the pre- and post- funcs to translate indices, and to avoid
+	// calling pre a second time for packages already checked above.
 	var pre2 preTypeCheck
 	if pre != nil {
 		pre2 = func(i int, ph *packageHandle) bool {
+			if preDone[i] {
+				return true // already called above; it said "proceed"
+			}
 			return pre(indexes[i], ph)
 		}
 	}
@@ -306,7 +322,7 @@ func (b *typeCheckBatch) getImportPackage(ctx context.Context, id PackageID) (pk
 			return types.Unsafe, nil
 		}
 
-		data, err := filecache.Get(exportDataKind, ph.key)
+		data, err := filecache.Get(exportDataKind, ph.key, filecache.Bytes)
 		if err == filecache.ErrNotFound {
 			// No cached export data: type-check as fast as possible.
 			return b.checkPackageForImport(ctx, ph)
@@ -414,7 +430,7 @@ func (b *typeCheckBatch) getPackage(ctx context.Context, ph *packageHandle) (*Pa
 // The context is used only for logging; cancellation does not affect the operation.
 func storePackageResults(ctx context.Context, ph *packageHandle, p *Package) {
 	toCache := map[string][]byte{
-		xrefsKind:       p.pkg.xrefs(),
+		xrefsKind:       p.pkg.xrefs().Encode(),
 		methodSetsKind:  p.pkg.methodsets().Encode(),
 		testsKind:       p.pkg.tests().Encode(),
 		diagnosticsKind: encodeDiagnostics(p.pkg.diagnostics),
@@ -1400,7 +1416,7 @@ func (s *Snapshot) typerefs(ctx context.Context, mp *metadata.Package, cgfs []fi
 // a cache miss.
 func (s *Snapshot) typerefData(ctx context.Context, id PackageID, imports map[ImportPath]*metadata.Package, cgfs []file.Handle) ([]byte, error) {
 	key := typerefsKey(id, imports, cgfs)
-	if data, err := filecache.Get(typerefsKind, key); err == nil {
+	if data, err := filecache.Get(typerefsKind, key, filecache.Bytes); err == nil {
 		return data, nil
 	} else if err != filecache.ErrNotFound {
 		bug.Reportf("internal error reading typerefs data: %v", err)
@@ -1866,8 +1882,7 @@ func depsErrors(ctx context.Context, snapshot *Snapshot, mp *metadata.Package) (
 	// we reach the workspace.
 	var errors []*Diagnostic
 	for _, depErr := range relevantErrors {
-		for i := len(depErr.ImportStack) - 1; i >= 0; i-- {
-			item := depErr.ImportStack[i]
+		for _, item := range slices.Backward(depErr.ImportStack) {
 			if snapshot.IsWorkspacePackage(PackageID(item)) {
 				break
 			}
@@ -1905,8 +1920,7 @@ func depsErrors(ctx context.Context, snapshot *Snapshot, mp *metadata.Package) (
 	// Add a diagnostic to the module that contained the lowest-level import of
 	// the missing package.
 	for _, depErr := range relevantErrors {
-		for i := len(depErr.ImportStack) - 1; i >= 0; i-- {
-			item := depErr.ImportStack[i]
+		for _, item := range slices.Backward(depErr.ImportStack) {
 			mp := snapshot.Metadata(PackageID(item))
 			if mp == nil || mp.Module == nil {
 				continue

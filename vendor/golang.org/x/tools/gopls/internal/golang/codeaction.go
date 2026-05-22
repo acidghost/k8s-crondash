@@ -28,6 +28,7 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/command"
 	"golang.org/x/tools/gopls/internal/settings"
+	"golang.org/x/tools/gopls/internal/util/cursorutil"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
@@ -259,6 +260,7 @@ var codeActionProducers = [...]codeActionProducer{
 	{kind: settings.RefactorRewriteChangeQuote, fn: refactorRewriteChangeQuote},
 	{kind: settings.RefactorRewriteFillStruct, fn: refactorRewriteFillStruct, needPkg: true},
 	{kind: settings.RefactorRewriteFillSwitch, fn: refactorRewriteFillSwitch, needPkg: true},
+	{kind: settings.RefactorRewriteImplementInterface, fn: refactorRewriteImplementInterface, needPkg: true},
 	{kind: settings.RefactorRewriteInvertIf, fn: refactorRewriteInvertIf},
 	{kind: settings.RefactorRewriteJoinLines, fn: refactorRewriteJoinLines, needPkg: true},
 	{kind: settings.RefactorRewriteRemoveUnusedParam, fn: refactorRewriteRemoveUnusedParam, needPkg: true},
@@ -357,7 +359,7 @@ func quickFix(ctx context.Context, req *codeActionsRequest) error {
 		// See [createUndeclared] for command implementation.
 		case strings.HasPrefix(msg, "undeclared name: "),
 			strings.HasPrefix(msg, "undefined: "):
-			cur, _ := req.pgf.Cursor.FindByPos(start, end)
+			cur, _ := req.pgf.Cursor().FindByPos(start, end)
 			title := undeclaredFixTitle(cur, msg)
 			if title != "" {
 				req.addApplyFixAction(title, fixCreateUndeclared, req.loc)
@@ -484,7 +486,7 @@ func goDoc(ctx context.Context, req *codeActionsRequest) error {
 // refactorExtractFunction produces "Extract function" code actions.
 // See [extractFunction] for command implementation.
 func refactorExtractFunction(ctx context.Context, req *codeActionsRequest) error {
-	if _, ok, _, _ := canExtractFunction(req.pgf.Cursor, req.start, req.end); ok {
+	if _, ok, _, _ := canExtractFunction(req.pgf.Cursor(), req.start, req.end); ok {
 		req.addApplyFixAction("Extract function", fixExtractFunction, req.loc)
 	}
 	return nil
@@ -493,7 +495,7 @@ func refactorExtractFunction(ctx context.Context, req *codeActionsRequest) error
 // refactorExtractMethod produces "Extract method" code actions.
 // See [extractMethod] for command implementation.
 func refactorExtractMethod(ctx context.Context, req *codeActionsRequest) error {
-	if _, ok, methodOK, _ := canExtractFunction(req.pgf.Cursor, req.start, req.end); ok && methodOK {
+	if _, ok, methodOK, _ := canExtractFunction(req.pgf.Cursor(), req.start, req.end); ok && methodOK {
 		req.addApplyFixAction("Extract method", fixExtractMethod, req.loc)
 	}
 	return nil
@@ -503,7 +505,7 @@ func refactorExtractMethod(ctx context.Context, req *codeActionsRequest) error {
 // See [extractVariable] for command implementation.
 func refactorExtractVariable(ctx context.Context, req *codeActionsRequest) error {
 	info := req.pkg.TypesInfo()
-	if curExprs, err := canExtractVariable(info, req.pgf.Cursor, req.start, req.end, false); err == nil && len(curExprs) > 0 {
+	if curExprs, err := canExtractVariable(info, req.pgf.Cursor(), req.start, req.end, false); err == nil && len(curExprs) > 0 {
 		// Offer one of refactor.extract.{constant,variable}
 		// based on the constness of the expression; this is a
 		// limitation of the codeActionProducers mechanism.
@@ -530,7 +532,7 @@ func refactorExtractVariableAll(ctx context.Context, req *codeActionsRequest) er
 	info := req.pkg.TypesInfo()
 	// Don't suggest if only one expr is found,
 	// otherwise it will duplicate with [refactorExtractVariable]
-	if curExprs, err := canExtractVariable(info, req.pgf.Cursor, req.start, req.end, true); err == nil && len(curExprs) > 1 {
+	if curExprs, err := canExtractVariable(info, req.pgf.Cursor(), req.start, req.end, true); err == nil && len(curExprs) > 1 {
 		expr0 := curExprs[0].Node().(ast.Expr)
 		text, err := req.pgf.NodeText(expr0)
 		if err != nil {
@@ -688,7 +690,7 @@ func refactorRewriteChangeQuote(ctx context.Context, req *codeActionsRequest) er
 // refactorRewriteInvertIf produces "Invert 'if' condition" code actions.
 // See [invertIfCondition] for command implementation.
 func refactorRewriteInvertIf(ctx context.Context, req *codeActionsRequest) error {
-	if _, ok, _ := canInvertIfCondition(req.pgf.Cursor, req.start, req.end); ok {
+	if _, ok, _ := canInvertIfCondition(req.pgf.Cursor(), req.start, req.end); ok {
 		req.addApplyFixAction("Invert 'if' condition", fixInvertIfCondition, req.loc)
 	}
 	return nil
@@ -698,7 +700,7 @@ func refactorRewriteInvertIf(ctx context.Context, req *codeActionsRequest) error
 // See [splitLines] for command implementation.
 func refactorRewriteSplitLines(ctx context.Context, req *codeActionsRequest) error {
 	// TODO(adonovan): opt: don't set needPkg just for FileSet.
-	if msg, ok, _ := canSplitLines(req.pgf.Cursor, req.pkg.FileSet(), req.start, req.end); ok {
+	if msg, ok, _ := canSplitLines(req.pgf.Cursor(), req.pkg.FileSet(), req.start, req.end); ok {
 		req.addApplyFixAction(msg, fixSplitLines, req.loc)
 	}
 	return nil
@@ -721,7 +723,11 @@ func refactorRewriteEliminateDotImport(ctx context.Context, req *codeActionsRequ
 	}
 
 	// dotImported package path and its imported name after removing the dot.
-	imported := req.pkg.TypesInfo().PkgNameOf(importSpec).Imported()
+	pkgname := req.pkg.TypesInfo().PkgNameOf(importSpec)
+	if pkgname == nil {
+		return nil // e.g. import . "C"
+	}
+	imported := pkgname.Imported()
 	newName := imported.Name()
 
 	rng, err := req.pgf.PosRange(importSpec.Name.Pos(), importSpec.Path.Pos())
@@ -740,7 +746,7 @@ func refactorRewriteEliminateDotImport(ctx context.Context, req *codeActionsRequ
 
 	// Go through each use of the dot imported package, checking its scope for
 	// shadowing and calculating an edit to qualify the identifier.
-	for curId := range req.pgf.Cursor.Preorder((*ast.Ident)(nil)) {
+	for curId := range req.pgf.Cursor().Preorder((*ast.Ident)(nil)) {
 		ident := curId.Node().(*ast.Ident)
 
 		// Only keep identifiers that use a symbol from the
@@ -757,7 +763,7 @@ func refactorRewriteEliminateDotImport(ctx context.Context, req *codeActionsRequ
 		// that reference package-level symbols.
 		// All other references to a symbol imported from another package
 		// are nested within a select expression (pkg.Foo, v.Method, v.Field).
-		if astutil.IsChildOf(curId, edge.SelectorExpr_Sel) {
+		if curId.ParentEdgeKind() == edge.SelectorExpr_Sel {
 			continue // qualified identifier (pkg.X) or selector (T.X or e.X)
 		}
 		if !typesinternal.IsPackageLevel(use) {
@@ -800,7 +806,7 @@ func refactorRewriteEliminateDotImport(ctx context.Context, req *codeActionsRequ
 // See [joinLines] for command implementation.
 func refactorRewriteJoinLines(ctx context.Context, req *codeActionsRequest) error {
 	// TODO(adonovan): opt: don't set needPkg just for FileSet.
-	if msg, ok, _ := canJoinLines(req.pgf.Cursor, req.pkg.FileSet(), req.start, req.end); ok {
+	if msg, ok, _ := canJoinLines(req.pgf.Cursor(), req.pkg.FileSet(), req.start, req.end); ok {
 		req.addApplyFixAction(msg, fixJoinLines, req.loc)
 	}
 	return nil
@@ -883,15 +889,70 @@ func selectionContainsStruct(cursor inspector.Cursor, start, end token.Pos, remo
 	return false
 }
 
+// supportsDialog reports whether the client supports interactive UI dialogs.
+//
+// If more than one form is provided, they are treated as a prioritized list of
+// alternatives, typically ordered with decreasing demands for client protocol
+// support. The function returns true if the client explicitly supports all
+// field input types required by at least one of these alternative forms.
+//
+// If no forms are provided, the function panics.
+func supportsDialog(options settings.ClientOptions, forms ...[]protocol.FormField) bool {
+	if len(forms) == 0 {
+		panic("supportsDialog called with empty forms")
+	}
+
+	// Ensure that at least one form does not depend on unsupported types.
+	for _, form := range forms {
+		if !slices.ContainsFunc(form, func(field protocol.FormField) bool {
+			return !options.SupportedInteractiveInputTypes[formFieldInputType(field.Type)]
+		}) {
+			return true // form is free of unsupported types
+		}
+	}
+
+	return false
+}
+
+// formFieldInputType extracts the interactive input type from a
+// protocol.FormFieldType*.
+//
+// It panics if the type is unknown, as forms are generated internally by gopls.
+func formFieldInputType(typ any) settings.InteractiveInputType {
+	switch t := typ.(type) {
+	case protocol.FormFieldTypeString:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeFile:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeBool:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeNumber:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeEnum:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeLazyEnum:
+		return settings.InteractiveInputType(t.Kind)
+	case protocol.FormFieldTypeList:
+		return settings.InteractiveInputType(t.Kind)
+	default:
+		// A form field type was added to gopls without updating this function.
+		panic(fmt.Sprintf("gopls bug: unhandled FormFieldType %T", typ))
+	}
+}
+
 // refactorRewriteAddStructTags produces "Add struct tags" code actions.
 // See [server.commandHandler.ModifyTags] for command implementation.
 func refactorRewriteAddStructTags(ctx context.Context, req *codeActionsRequest) error {
-	if selectionContainsStruct(req.pgf.Cursor, req.start, req.end, false) {
-		// TODO(mkalil): Prompt user for modification args once we have dialogue capabilities.
+	if selectionContainsStruct(req.pgf.Cursor(), req.start, req.end, false) {
+		add := ""
+		if !supportsDialog(req.snapshot.Options().ClientOptions, addTagsForm) {
+			add = "json" // default choice
+		}
 		cmdAdd := command.NewModifyTagsCommand("Add struct tags", command.ModifyTagsArgs{
-			URI:   req.loc.URI,
-			Range: req.loc.Range,
-			Add:   "json",
+			Modification: "add",
+			URI:          req.loc.URI,
+			Range:        req.loc.Range,
+			Add:          add,
 		})
 		req.addCommandAction(cmdAdd, false)
 	}
@@ -901,15 +962,65 @@ func refactorRewriteAddStructTags(ctx context.Context, req *codeActionsRequest) 
 // refactorRewriteRemoveStructTags produces "Remove struct tags" code actions.
 // See [server.commandHandler.ModifyTags] for command implementation.
 func refactorRewriteRemoveStructTags(ctx context.Context, req *codeActionsRequest) error {
-	// TODO(mkalil): Prompt user for modification args once we have dialogue capabilities.
-	if selectionContainsStruct(req.pgf.Cursor, req.start, req.end, true) {
+	if selectionContainsStruct(req.pgf.Cursor(), req.start, req.end, true) {
+		clear := !supportsDialog(req.snapshot.Options().ClientOptions, removeTagsForm) // clear the entry if there is no dialog
 		cmdRemove := command.NewModifyTagsCommand("Remove struct tags", command.ModifyTagsArgs{
-			URI:   req.loc.URI,
-			Range: req.loc.Range,
-			Clear: true,
+			Modification: "remove",
+			URI:          req.loc.URI,
+			Range:        req.loc.Range,
+			Clear:        clear,
 		})
 		req.addCommandAction(cmdRemove, false)
 	}
+	return nil
+}
+
+// refactorRewriteImplementInterface produces "Add methods to implement an
+// interface." code actions.
+// See [server.commandHandler.ImplementInterface] for command implementation.
+func refactorRewriteImplementInterface(_ context.Context, req *codeActionsRequest) error {
+	// The "Implement Interface" interaction requires either lazy enum support
+	// (for rich workspace symbol search) or at least string support (as a fallback
+	// text prompt). We disable the action if the client supports neither.
+	if !supportsDialog(req.snapshot.Options().ClientOptions, implementInterfaceFormLazyEnum, implementInterfaceFormString) {
+		return nil
+	}
+
+	start, end, err := req.pgf.RangePos(req.loc.Range)
+	if err != nil {
+		return err
+	}
+
+	cur, _, _, _ := astutil.Select(req.pgf.Cursor(), start, end) // can't fail
+
+	spec, curSpec := cursorutil.FirstEnclosing[*ast.TypeSpec](cur)
+	if spec == nil {
+		return nil
+	}
+
+	// Only offer code action for package level type spec.
+	if curSpec.Parent().Parent().Node() != req.pgf.File {
+		return nil
+	}
+
+	named, ok := types.Unalias(req.pkg.TypesInfo().TypeOf(spec.Name)).(*types.Named)
+	if !ok {
+		return nil
+	}
+
+	if is[*types.Pointer](named.Underlying()) || types.IsInterface(named) {
+		return nil
+	}
+
+	// Have: concrete defined type
+	cmdAdd := command.NewImplementInterfaceCommand(
+		fmt.Sprintf("Add methods to %s to implement an interface...", spec.Name.Name),
+		command.ImplementInterfaceArgs{
+			Location: req.loc,
+			// Interface will be provided by the user through dialog.
+		},
+	)
+	req.addCommandAction(cmdAdd, false)
 	return nil
 }
 
@@ -985,7 +1096,7 @@ func refactorInlineCall(ctx context.Context, req *codeActionsRequest) error {
 // See [inlineVariableOne] for command implementation.
 func refactorInlineVariable(ctx context.Context, req *codeActionsRequest) error {
 	// TODO(adonovan): offer "inline all" variant that eliminates the var (see #70085).
-	if curUse, _, ok := canInlineVariable(req.pkg.TypesInfo(), req.pgf.Cursor, req.start, req.end); ok {
+	if curUse, _, ok := canInlineVariable(req.pkg.TypesInfo(), req.pgf.Cursor(), req.start, req.end); ok {
 		title := fmt.Sprintf("Inline variable %q", curUse.Node().(*ast.Ident).Name)
 		req.addApplyFixAction(title, fixInlineVariable, req.loc)
 	}
@@ -1060,7 +1171,7 @@ func goAssembly(ctx context.Context, req *codeActionsRequest) error {
 	}
 	sym.WriteString(".")
 
-	curSel, _ := req.pgf.Cursor.FindByPos(req.start, req.end)
+	curSel, _ := req.pgf.Cursor().FindByPos(req.start, req.end)
 	for cur := range curSel.Enclosing((*ast.FuncDecl)(nil), (*ast.ValueSpec)(nil)) {
 		var name string // in command title
 		switch node := cur.Node().(type) {
@@ -1134,8 +1245,9 @@ func toggleCompilerOptDetails(ctx context.Context, req *codeActionsRequest) erro
 	return nil
 }
 
-func refactorMoveType(ctx context.Context, req *codeActionsRequest) error {
-	curSel, _ := req.pgf.Cursor.FindByPos(req.start, req.end)
+// (this function is unused)
+func refactorMoveType(_ context.Context, req *codeActionsRequest) error {
+	curSel, _ := req.pgf.Cursor().FindByPos(req.start, req.end)
 	if _, _, _, typeName, ok := selectionContainsType(curSel); ok {
 		cmd := command.NewMoveTypeCommand(fmt.Sprintf("Move type %s", typeName), command.MoveTypeArgs{Location: req.loc})
 		req.addCommandAction(cmd, false)
