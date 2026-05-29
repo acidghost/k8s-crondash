@@ -1,9 +1,11 @@
 package logger
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -49,6 +51,40 @@ const (
 	TagWhite             = "white"
 	TagReset             = "reset"
 )
+
+// ErrTagInvalid is returned by RegisterTag and panicked from MustRegisterTag
+// when the supplied tag name or renderer is empty.
+var ErrTagInvalid = errors.New("logger: tag name and function are required")
+
+var registeredTags = struct {
+	m map[string]LogFunc
+	sync.RWMutex
+}{
+	m: make(map[string]LogFunc),
+}
+
+// RegisterTag registers a global logger middleware tag.
+// Registered tags are available to logger middleware instances created after
+// registration and can be overridden per instance with Config.CustomTags.
+// Re-registering a tag replaces the existing tag function.
+func RegisterTag(tag string, fn LogFunc) error {
+	if tag == "" || fn == nil {
+		return ErrTagInvalid
+	}
+
+	registeredTags.Lock()
+	defer registeredTags.Unlock()
+
+	registeredTags.m[tag] = fn
+	return nil
+}
+
+// MustRegisterTag registers a global logger middleware tag and panics on failure.
+func MustRegisterTag(tag string, fn LogFunc) {
+	if err := RegisterTag(tag, fn); err != nil {
+		panic(err)
+	}
+}
 
 // createTagMap function merged the default with the custom tags
 func createTagMap(cfg *Config) map[string]LogFunc {
@@ -144,7 +180,7 @@ func createTagMap(cfg *Config) map[string]LogFunc {
 		},
 		TagError: func(output Buffer, c fiber.Ctx, data *Data, _ string) (int, error) {
 			if data.ChainErr != nil {
-				if cfg.enableColors {
+				if cfg.areColorsEnabled {
 					colors := c.App().Config().ColorScheme
 					return fmt.Fprintf(output, "%s%s%s", colors.Red, data.ChainErr.Error(), colors.Reset)
 				}
@@ -180,14 +216,14 @@ func createTagMap(cfg *Config) map[string]LogFunc {
 			}
 		},
 		TagStatus: func(output Buffer, c fiber.Ctx, _ *Data, _ string) (int, error) {
-			if cfg.enableColors {
+			if cfg.areColorsEnabled {
 				colors := c.App().Config().ColorScheme
 				return fmt.Fprintf(output, "%s%3d%s", statusColor(c.Response().StatusCode(), &colors), c.Response().StatusCode(), colors.Reset)
 			}
 			return appendInt(output, c.Response().StatusCode())
 		},
 		TagMethod: func(output Buffer, c fiber.Ctx, _ *Data, _ string) (int, error) {
-			if cfg.enableColors {
+			if cfg.areColorsEnabled {
 				colors := c.App().Config().ColorScheme
 				return fmt.Fprintf(output, "%s%s%s", methodColor(c.Method(), &colors), c.Method(), colors.Reset)
 			}
@@ -204,6 +240,10 @@ func createTagMap(cfg *Config) map[string]LogFunc {
 			return output.WriteString(data.Timestamp.Load().(string)) //nolint:forcetypeassert,errcheck // We always store a string in here
 		},
 	}
+	registeredTags.RLock()
+	maps.Copy(tagFunctions, registeredTags.m)
+	registeredTags.RUnlock()
+
 	// merge with custom tags from user
 	maps.Copy(tagFunctions, cfg.CustomTags)
 
