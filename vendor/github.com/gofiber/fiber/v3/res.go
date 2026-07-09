@@ -11,6 +11,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -282,7 +283,7 @@ func (r *DefaultRes) Cookie(cookie *Cookie) {
 	}
 
 	// create/validate cookie using net/http
-	hc := &http.Cookie{
+	hc := &http.Cookie{ //nolint:gosec // G124: http.Cookie missing or has insecure Secure, HttpOnly, or SameSite attribute
 		Name:        cookie.Name,
 		Value:       cookie.Value,
 		Path:        cookie.Path,
@@ -322,8 +323,6 @@ func (r *DefaultRes) Cookie(cookie *Cookie) {
 		fcookie.SetSameSite(fasthttp.CookieSameSiteStrictMode)
 	case http.SameSiteNoneMode:
 		fcookie.SetSameSite(fasthttp.CookieSameSiteNoneMode)
-	case http.SameSiteDefaultMode:
-		fcookie.SetSameSite(fasthttp.CookieSameSiteDefaultMode)
 	default:
 		fcookie.SetSameSite(fasthttp.CookieSameSiteDisabled)
 	}
@@ -679,8 +678,7 @@ func (r *DefaultRes) Render(name string, bind any, layouts ...string) error {
 
 	rootApp := r.c.app
 	var rendered bool
-	for i := len(rootApp.mountFields.appListKeys) - 1; i >= 0; i-- {
-		prefix := rootApp.mountFields.appListKeys[i]
+	for _, prefix := range slices.Backward(rootApp.mountFields.appListKeys) {
 		app := rootApp.mountFields.appList[prefix]
 		if prefix == "" || strings.Contains(r.c.OriginalURL(), prefix) {
 			if len(layouts) == 0 && app.config.ViewsLayout != "" {

@@ -12,6 +12,31 @@
 - Protect hot paths from regressions: profile changes.
 - Apply secure-by-default choices (validation, timeouts, sanitization) and ensure new code hardens attack surfaces.
 
+### Linter pitfalls (run `make lint` before every push)
+
+The linter is the most common reason CI fails for generated changes. Always run
+`make lint` locally and fix every finding *before* committing — do not rely on
+CI to surface them. The `golangci-lint` config (`.golangci.yml`) enables strict
+`errcheck` settings (`check-type-assertions: true` and `check-blank: true`),
+which trip up the patterns below:
+
+- **Never discard a type-assertion result with `_`.** `v, _ := x.(T)` fails
+  `errcheck`. Use the comma-ok form and act on it instead:
+
+  ```go
+  v, ok := x.(T)
+  if !ok {
+      v = T{} // explicit fallback; the zero value is fine when that's intended
+  }
+  ```
+
+- **Never discard a returned `error` with `_`** (`check-blank`). Handle it, or
+  if it is genuinely safe to ignore, call the function without assignment or add
+  a justified `//nolint:errcheck // reason` comment.
+
+- When in doubt, run `make lint` (or `golangci-lint run ./<pkg>/...`) and treat a
+  non-zero exit as a blocker.
+
 ---
 
 ## Startup script (reference only – do not run)
@@ -31,7 +56,6 @@
   go install github.com/tinylib/msgp@latest                # msgp codegen
   go install github.com/vburenin/ifacemaker@f30b6f9bdbed4b5c4804ec9ba4a04a999525c202  # interface impls
   go install github.com/dkorunic/betteralign/cmd/betteralign@latest  # struct alignment
-  go install golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest
   go mod tidy                                              # clean up go.mod & go.sum
   ```
 
@@ -49,7 +73,6 @@ Use `make help` to list all available commands. Common targets include:
 - **tidy**: clean and tidy dependencies.
 - **betteralign**: optimize struct field alignment.
 - **generate**: run `go generate` after installing msgp and ifacemaker.
-- **modernize**: run golps modernize
 
 These targets can be invoked via `make <target>` as needed during development and testing.
 
@@ -68,7 +91,6 @@ final response to confirm they were executed:
 make audit
 make generate
 make betteralign
-make modernize
 make format
 make lint
 make test

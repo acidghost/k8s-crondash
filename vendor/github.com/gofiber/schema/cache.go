@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	utils "github.com/gofiber/utils/v2"
+	utilstrings "github.com/gofiber/utils/v2/strings"
 )
 
 const maxParserIndex = 1000
@@ -23,24 +24,34 @@ var (
 // newCache returns a new cache.
 func newCache() *cache {
 	c := cache{
-		m:       make(map[reflect.Type]*structInfo),
-		regconv: make(map[reflect.Type]Converter),
-		tag:     "schema",
+		m:         make(map[reflect.Type]*structInfo),
+		pathCache: make(map[pathCacheKey][]pathPart),
+		regconv:   make(map[reflect.Type]Converter),
+		tag:       "schema",
 	}
 	return &c
 }
 
 // cache caches meta-data about a struct.
 type cache struct {
-	l       sync.RWMutex
-	m       map[reflect.Type]*structInfo
-	regconv map[reflect.Type]Converter
-	tag     string
+	l         sync.RWMutex
+	m         map[reflect.Type]*structInfo
+	pathCache map[pathCacheKey][]pathPart
+	regconv   map[reflect.Type]Converter
+	tag       string
+}
+
+type pathCacheKey struct {
+	path string
+	typ  reflect.Type
 }
 
 // registerConverter registers a converter function for a custom type.
 func (c *cache) registerConverter(value interface{}, converterFunc Converter) {
+	c.l.Lock()
 	c.regconv[reflect.TypeOf(value)] = converterFunc
+	c.reset()
+	c.l.Unlock()
 }
 
 // parsePath parses a path in dotted notation verifying that it is a valid
@@ -50,6 +61,14 @@ func (c *cache) registerConverter(value interface{}, converterFunc Converter) {
 // reflect.Value.FieldByString(). Multiple parts are required for slices of
 // structs.
 func (c *cache) parsePath(p string, t reflect.Type) ([]pathPart, error) {
+	cacheKey := pathCacheKey{path: p, typ: t}
+	c.l.RLock()
+	cached, ok := c.pathCache[cacheKey]
+	c.l.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
 	var struc *structInfo
 	var field *fieldInfo
 	var index64 int64
@@ -132,6 +151,15 @@ func (c *cache) parsePath(p string, t reflect.Type) ([]pathPart, error) {
 		field: field,
 		index: -1,
 	})
+
+	c.l.Lock()
+	if cached, ok := c.pathCache[cacheKey]; ok {
+		c.l.Unlock()
+		return cached, nil
+	}
+	c.pathCache[cacheKey] = parts
+	c.l.Unlock()
+
 	return parts, nil
 }
 
@@ -158,6 +186,12 @@ func (c *cache) get(t reflect.Type) *structInfo {
 		c.l.Unlock()
 	}
 	return info
+}
+
+// reset clears cached metadata and must be called with c.l held.
+func (c *cache) reset() {
+	c.m = make(map[reflect.Type]*structInfo)
+	c.pathCache = make(map[pathCacheKey][]pathPart)
 }
 
 // create creates a structInfo with meta-data about a struct.
@@ -188,11 +222,11 @@ func (c *cache) create(t reflect.Type, parentAlias string) *structInfo {
 	}
 	info.fieldsByName = make(map[string]*fieldInfo, len(info.fields))
 	for _, field := range info.fields {
-		aliasKey := utils.ToLower(field.alias)
-		if _, exists := info.fieldsByName[aliasKey]; !exists {
-			info.fieldsByName[aliasKey] = field
+		if _, exists := info.fieldsByName[field.aliasLower]; !exists {
+			info.fieldsByName[field.aliasLower] = field
 		}
 	}
+	info.requiredFields = c.buildRequiredFields(info)
 	return info
 }
 
@@ -228,7 +262,7 @@ func (c *cache) createField(field reflect.StructField, parentAlias string) *fiel
 		}
 	}
 	if isStruct = ft.Kind() == reflect.Struct; !isStruct {
-		if c.converter(ft) == nil && builtinConverters[ft.Kind()] == nil {
+		if c.converter(ft) == nil && getBuiltinConverter(ft.Kind()) == nil {
 			// Type is not supported.
 			return nil
 		}
@@ -238,6 +272,7 @@ func (c *cache) createField(field reflect.StructField, parentAlias string) *fiel
 		typ:              field.Type,
 		name:             field.Name,
 		alias:            alias,
+		aliasLower:       utilstrings.ToLower(alias),
 		canonicalAlias:   canonicalAlias,
 		unmarshalerInfo:  m,
 		isSliceOfStructs: isSlice && isStruct,
@@ -258,24 +293,48 @@ type structInfo struct {
 	fields             []*fieldInfo
 	fieldsByName       map[string]*fieldInfo
 	anonymousPtrFields []int
+	requiredFields     map[string][]fieldWithPrefix
 }
 
 func (i *structInfo) get(alias string) *fieldInfo {
-	aliasKey := utils.ToLower(alias)
+	aliasKey := utilstrings.ToLower(alias)
 	if field, ok := i.fieldsByName[aliasKey]; ok {
 		return field
-	}
-	for _, field := range i.fields {
-		if utils.ToLower(field.alias) == aliasKey {
-			return field
-		}
 	}
 	return nil
 }
 
+func (c *cache) buildRequiredFields(info *structInfo) map[string][]fieldWithPrefix {
+	var requiredFields map[string][]fieldWithPrefix
+	for _, field := range info.fields {
+		if field.typ.Kind() == reflect.Struct {
+			nested := c.get(field.typ)
+			for _, prefix := range field.paths("") {
+				nestedPrefix := prefix + "."
+				for key, fields := range nested.requiredFields {
+					requiredKey := field.canonicalAlias + "." + key
+					for _, nestedField := range fields {
+						requiredFields = appendRequiredField(requiredFields, requiredKey, fieldWithPrefix{
+							fieldInfo: nestedField.fieldInfo,
+							prefix:    nestedPrefix + nestedField.prefix,
+						})
+					}
+				}
+			}
+		}
+		if field.isRequired {
+			requiredFields = appendRequiredField(requiredFields, field.canonicalAlias, fieldWithPrefix{
+				fieldInfo: field,
+			})
+		}
+	}
+	return requiredFields
+}
+
 func containsAlias(infos []*structInfo, alias string) bool {
+	aliasKey := utilstrings.ToLower(alias)
 	for _, info := range infos {
-		if info.get(alias) != nil {
+		if _, ok := info.fieldsByName[aliasKey]; ok {
 			return true
 		}
 	}
@@ -287,6 +346,8 @@ type fieldInfo struct {
 	// name is the field name in the struct.
 	name  string
 	alias string
+	// aliasLower is the pre-computed lowercase alias for fast lookups.
+	aliasLower string
 	// canonicalAlias is almost the same as the alias, but is prefixed with
 	// an embedded struct field alias in dotted notation if this field is
 	// promoted from the struct.
@@ -344,8 +405,10 @@ type tagOptions []string
 // parseTag splits a struct field's url tag into its name and comma-separated
 // options.
 func parseTag(tag string) (string, tagOptions) {
-	s := strings.Split(tag, ",")
-	return s[0], s[1:]
+	if idx := strings.IndexByte(tag, ','); idx != -1 {
+		return tag[:idx], strings.Split(tag[idx+1:], ",")
+	}
+	return tag, nil
 }
 
 // Contains checks whether the tagOptions contains the specified option.
