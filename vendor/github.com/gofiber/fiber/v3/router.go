@@ -28,6 +28,7 @@ type Router interface {
 	Options(path string, handler any, handlers ...any) Router
 	Trace(path string, handler any, handlers ...any) Router
 	Patch(path string, handler any, handlers ...any) Router
+	Query(path string, handler any, handlers ...any) Router
 
 	Add(methods []string, path string, handler any, handlers ...any) Router
 	All(path string, handler any, handlers ...any) Router
@@ -68,9 +69,8 @@ type Route struct {
 }
 
 var (
-	defaultGreedyParameterKeys        = []string{"*", "+"}
-	preferredWildcardGreedyParameters = []string{"*", "+"}
-	preferredPlusGreedyParameters     = []string{"+", "*"}
+	defaultGreedyParameterKeys    = []string{"*", "+"}
+	preferredPlusGreedyParameters = []string{"+", "*"}
 )
 
 // URL generates a URL from the route path and parameters.
@@ -232,15 +232,11 @@ func (app *App) next(c *DefaultCtx) (bool, error) {
 	if !ok {
 		tree = app.treeStack[methodInt][0]
 	}
-	lenr := len(tree) - 1
+	indexRoute := max(c.indexRoute+1, 0)
 
-	indexRoute := c.indexRoute
-
-	// Loop over the route stack starting from previous index
-	for indexRoute < lenr {
-		// Increment route index
-		indexRoute++
-
+	// Loop over the route stack starting from previous index;
+	// the clamp above plus the len(tree) guard keep tree[indexRoute] bounds-check free
+	for ; indexRoute < len(tree); indexRoute++ {
 		// Get *Route
 		route := tree[indexRoute]
 
@@ -276,6 +272,10 @@ func (app *App) next(c *DefaultCtx) (bool, error) {
 	// If c.Next() does not match, return 404
 	// If no match, scan stack again if other methods match the request
 	// Moved from app.handler because middleware may break the route chain
+	if c.shouldSkipNonUseRoutes {
+		return false, nil
+	}
+
 	if c.isMatched {
 		return false, ErrNotFound
 	}
@@ -333,15 +333,11 @@ func (app *App) nextCustom(c CustomCtx) (bool, error) {
 	if !ok {
 		tree = app.treeStack[methodInt][0]
 	}
-	lenr := len(tree) - 1
+	indexRoute := max(c.getIndexRoute()+1, 0)
 
-	indexRoute := c.getIndexRoute()
-
-	// Loop over the route stack starting from previous index
-	for indexRoute < lenr {
-		// Increment route index
-		indexRoute++
-
+	// Loop over the route stack starting from previous index;
+	// the clamp above plus the len(tree) guard keep tree[indexRoute] bounds-check free
+	for ; indexRoute < len(tree); indexRoute++ {
 		// Get *Route
 		route := tree[indexRoute]
 
@@ -375,6 +371,10 @@ func (app *App) nextCustom(c CustomCtx) (bool, error) {
 	// If c.Next() does not match, return 404
 	// If no match, scan stack again if other methods match the request
 	// Moved from app.handler because middleware may break the route chain
+	if c.getSkipNonUseRoutes() {
+		return false, nil
+	}
+
 	if c.getMatched() {
 		return false, ErrNotFound
 	}
@@ -584,7 +584,7 @@ func (app *App) deleteRoute(methods []string, matchFunc func(r *Route) bool) {
 			continue // Skip invalid HTTP methods
 		}
 
-		for i := len(app.stack[m]) - 1; i >= 0; i-- {
+		for i := len(app.stack[m]) - 1; i >= 0; i-- { //nolint:modernize // false positive
 			route := app.stack[m][i]
 			if !matchFunc(route) {
 				continue // Skip if route does not match
@@ -621,8 +621,7 @@ func (app *App) pruneAutoHeadRouteLocked(path string) {
 	norm := app.normalizePath(path)
 
 	headStack := app.stack[headIndex]
-	for i := len(headStack) - 1; i >= 0; i-- {
-		headRoute := headStack[i]
+	for i, headRoute := range slices.Backward(headStack) {
 		if headRoute.path != norm || headRoute.mount || headRoute.use || !headRoute.autoHead {
 			continue
 		}
