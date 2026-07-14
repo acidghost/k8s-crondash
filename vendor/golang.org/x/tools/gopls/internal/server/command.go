@@ -45,7 +45,6 @@ import (
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/jsonrpc2"
-	"golang.org/x/tools/internal/xcontext"
 )
 
 func (s *server) ExecuteCommand(ctx context.Context, params *protocol.ExecuteCommandParams) (any, error) {
@@ -76,6 +75,12 @@ func (s *server) ExecuteCommand(ctx context.Context, params *protocol.ExecuteCom
 			counter.New(counterName).Inc()
 			params.Arguments = params.Arguments[:len(params.Arguments)-1]
 		}
+	}
+
+	if len(params.FormAnswers) != 0 {
+		commandName := strings.TrimPrefix(params.Command, "gopls.")
+		counterName := fmt.Sprintf("gopls/interactive/command:%s", commandName)
+		counter.New(counterName).Inc()
 	}
 
 	handler := &commandHandler{
@@ -404,7 +409,7 @@ func (c *commandHandler) run(ctx context.Context, cfg commandConfig, run command
 	// Inv: release() must be called exactly once after this point.
 	// In the async case, runcmd may outlive run().
 
-	ctx, cancel := context.WithCancel(xcontext.Detach(ctx))
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	if cfg.progress != "" {
 		header := ""
 		if _, ok := c.s.options.SupportedWorkDoneProgressFormats[cfg.progressStyle]; ok && cfg.progressStyle != "" {
@@ -1814,7 +1819,7 @@ func (c *commandHandler) ImplementInterface(ctx context.Context, args command.Im
 		progress: "Implement interface X",
 		forURI:   args.Location.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		iface, err := golang.FormAnswer[string](params, 0)
+		iface, err := golang.FormAnswer[string](params, "interface")
 		if err != nil {
 			return err
 		}
@@ -1835,7 +1840,7 @@ func (c *commandHandler) ModifyTags(ctx context.Context, args command.ModifyTags
 		if len(params.FormAnswers) > 0 {
 			switch args.Modification {
 			case "add":
-				tags, err := golang.FormAnswer[string](params, 0)
+				tags, err := golang.FormAnswer[string](params, "tags")
 				if err != nil {
 					return err
 				}
@@ -1843,12 +1848,12 @@ func (c *commandHandler) ModifyTags(ctx context.Context, args command.ModifyTags
 				if err != nil {
 					return err
 				}
-				args.Transform, err = golang.FormAnswer[string](params, 1)
+				args.Transform, err = golang.FormAnswer[string](params, "transform")
 				if err != nil {
 					return err
 				}
 			case "remove":
-				tags, err := golang.FormAnswer[string](params, 0)
+				tags, err := golang.FormAnswer[string](params, "tags")
 				if err != nil {
 					return err
 				}
@@ -1936,10 +1941,15 @@ func (c *commandHandler) MoveType(ctx context.Context, args command.MoveTypeArgs
 	err := c.run(ctx, commandConfig{
 		forURI: args.Location.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		changes, err := golang.MoveType(ctx, deps.fh, deps.snapshot, args.Location, "newpkg/new.go")
+		// TODO(mkalil): implement with interactive params
+		destFile := filepath.Join(args.Location.URI.DirPath(), "otherpkg", "destfile.go")
+		destURI := protocol.URIFromPath(destFile)
+		changes, rng, err := golang.MoveType(ctx, deps.fh, deps.snapshot, args.Location, destURI)
 		if err != nil {
 			return err
 		}
+		// Open the file where the type was moved to.
+		showDocumentImpl(ctx, c.s.client, protocol.URI(destURI), &rng.Range, c.s.options)
 		return applyChanges(ctx, c.s.client, changes)
 	})
 	return err

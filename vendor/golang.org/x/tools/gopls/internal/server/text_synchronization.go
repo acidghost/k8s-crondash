@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
-	"golang.org/x/tools/internal/xcontext"
 )
 
 // ModificationSource identifies the origin of a change.
@@ -111,13 +110,13 @@ func (s *server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocume
 			Name: filepath.Base(dir),
 		}})
 	}
-	return s.didModifyFiles(ctx, []file.Modification{{
+	return s.didModifyFiles(ctx, FromDidOpen, file.Modification{
 		URI:        uri,
 		Action:     file.Open,
 		Version:    params.TextDocument.Version,
 		Text:       []byte(params.TextDocument.Text),
 		LanguageID: params.TextDocument.LanguageID,
-	}}, FromDidOpen)
+	})
 }
 
 func (s *server) DidChange(ctx context.Context, params *protocol.DidChangeTextDocumentParams) error {
@@ -129,16 +128,12 @@ func (s *server) DidChange(ctx context.Context, params *protocol.DidChangeTextDo
 	if err != nil {
 		return err
 	}
-	c := file.Modification{
+	return s.didModifyFiles(ctx, FromDidChange, file.Modification{
 		URI:     uri,
 		Action:  file.Change,
 		Version: params.TextDocument.Version,
 		Text:    text,
-	}
-	if err := s.didModifyFiles(ctx, []file.Modification{c}, FromDidChange); err != nil {
-		return err
-	}
-	return s.warnAboutModifyingGeneratedFiles(ctx, uri)
+	})
 }
 
 // warnAboutModifyingGeneratedFiles shows a warning if a user tries to edit a
@@ -178,47 +173,46 @@ func (s *server) DidChangeWatchedFiles(ctx context.Context, params *protocol.Did
 	ctx, done := event.Start(ctx, "server.DidChangeWatchedFiles")
 	defer done()
 
-	var modifications []file.Modification
-	for _, change := range params.Changes {
+	modifications := make([]file.Modification, len(params.Changes))
+	for i, change := range params.Changes {
 		action := changeTypeToFileAction(change.Type)
-		modifications = append(modifications, file.Modification{
+		modifications[i] = file.Modification{
 			URI:    change.URI,
 			Action: action,
 			OnDisk: true,
-		})
+		}
 	}
-	return s.didModifyFiles(ctx, modifications, FromDidChangeWatchedFiles)
+	return s.didModifyFiles(ctx, FromDidChangeWatchedFiles, modifications...)
 }
 
 func (s *server) DidSave(ctx context.Context, params *protocol.DidSaveTextDocumentParams) error {
 	ctx, done := event.Start(ctx, "server.DidSave", label.URI.Of(params.TextDocument.URI))
 	defer done()
 
-	c := file.Modification{
+	var text []byte
+	if params.Text != nil {
+		text = []byte(*params.Text)
+	}
+	return s.didModifyFiles(ctx, FromDidSave, file.Modification{
 		URI:    params.TextDocument.URI,
 		Action: file.Save,
-	}
-	if params.Text != nil {
-		c.Text = []byte(*params.Text)
-	}
-	return s.didModifyFiles(ctx, []file.Modification{c}, FromDidSave)
+		Text:   text,
+	})
 }
 
 func (s *server) DidClose(ctx context.Context, params *protocol.DidCloseTextDocumentParams) error {
 	ctx, done := event.Start(ctx, "server.DidClose", label.URI.Of(params.TextDocument.URI))
 	defer done()
 
-	return s.didModifyFiles(ctx, []file.Modification{
-		{
-			URI:     params.TextDocument.URI,
-			Action:  file.Close,
-			Version: -1,
-			Text:    nil,
-		},
-	}, FromDidClose)
+	return s.didModifyFiles(ctx, FromDidClose, file.Modification{
+		URI:     params.TextDocument.URI,
+		Action:  file.Close,
+		Version: -1,
+		Text:    nil,
+	})
 }
 
-func (s *server) didModifyFiles(ctx context.Context, modifications []file.Modification, cause ModificationSource) error {
+func (s *server) didModifyFiles(ctx context.Context, cause ModificationSource, modifications ...file.Modification) error {
 	// Something happened. Wake up a quiescent file watcher.
 	s.fileWatcherMu.Lock()
 	if s.fileWatcher != nil {
@@ -271,6 +265,12 @@ func (s *server) didModifyFiles(ctx context.Context, modifications []file.Modifi
 	// golang/go#50267: diagnostics should be re-sent after each change.
 	for _, mod := range modifications {
 		s.mustPublishDiagnostics(mod.URI)
+
+		if cause == FromDidChange && mod.Action == file.Change {
+			if err := s.warnAboutModifyingGeneratedFiles(ctx, mod.URI); err != nil {
+				return err // e.g. failed to get snapshot
+			}
+		}
 	}
 
 	modCtx, modID := s.needsDiagnosis(ctx, viewsToDiagnose)
@@ -328,7 +328,7 @@ func (s *server) needsDiagnosis(ctx context.Context, viewsToDiagnose map[*cache.
 	if s.cancelPrevDiagnostics != nil {
 		s.cancelPrevDiagnostics()
 	}
-	modCtx := xcontext.Detach(ctx)
+	modCtx := context.WithoutCancel(ctx)
 	modCtx, s.cancelPrevDiagnostics = context.WithCancel(modCtx)
 	s.lastModificationID++
 	modID := s.lastModificationID

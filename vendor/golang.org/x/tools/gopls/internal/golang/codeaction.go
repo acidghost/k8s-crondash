@@ -256,7 +256,7 @@ var codeActionProducers = [...]codeActionProducer{
 	{kind: settings.RefactorExtractVariableAll, fn: refactorExtractVariableAll, needPkg: true},
 	{kind: settings.RefactorInlineCall, fn: refactorInlineCall, needPkg: true},
 	{kind: settings.RefactorInlineVariable, fn: refactorInlineVariable, needPkg: true},
-	// {kind: settings.RefactorMoveType, fn: refactorMoveType, needPkg: true},
+	{kind: settings.RefactorMoveType, fn: refactorMoveType, needPkg: true},
 	{kind: settings.RefactorRewriteChangeQuote, fn: refactorRewriteChangeQuote},
 	{kind: settings.RefactorRewriteFillStruct, fn: refactorRewriteFillStruct, needPkg: true},
 	{kind: settings.RefactorRewriteFillSwitch, fn: refactorRewriteFillSwitch, needPkg: true},
@@ -339,7 +339,7 @@ func quickFix(ctx context.Context, req *codeActionsRequest) error {
 			si := stubmethods.GetIfaceStubInfo(req.pkg.FileSet(), info, req.pgf, start, end)
 			if si != nil {
 				qual := typesinternal.FileQualifier(req.pgf.File, si.Concrete.Obj().Pkg())
-				iface := types.TypeString(si.Interface.Type(), qual)
+				iface := types.TypeString(si.Interface, qual)
 				msg := fmt.Sprintf("Declare missing methods of %s", iface)
 				req.addApplyFixAction(msg, fixMissingInterfaceMethods, req.loc)
 			}
@@ -815,10 +815,10 @@ func refactorRewriteJoinLines(ctx context.Context, req *codeActionsRequest) erro
 // refactorRewriteFillStruct produces "Fill STRUCT" code actions.
 // See [fillstruct.SuggestedFix] for command implementation.
 func refactorRewriteFillStruct(ctx context.Context, req *codeActionsRequest) error {
-	// fillstruct.Diagnose is a lazy analyzer: all it gives us is
-	// the (start, end, message) of each SuggestedFix; the actual
-	// edit is computed only later by ApplyFix, which calls fillstruct.SuggestedFix.
-	for _, diag := range fillstruct.Diagnose(req.pgf.File, req.start, req.end, req.pkg.Types(), req.pkg.TypesInfo()) {
+	// [fillstruct.Diagnose] is a lazy analyzer: all it gives us is the
+	// (start, end, message) of each SuggestedFix; the actual edit is
+	// computed only later by ApplyFix, which calls [fillstruct.SuggestedFix].
+	for _, diag := range fillstruct.Diagnose(req.pgf.Cursor(), req.start, req.end, req.pkg.Types(), req.pkg.TypesInfo()) {
 		loc, err := req.pgf.Mapper.PosLocation(req.pgf.Tok, diag.Pos, diag.End)
 		if err != nil {
 			return err
@@ -827,6 +827,7 @@ func refactorRewriteFillStruct(ctx context.Context, req *codeActionsRequest) err
 			req.addApplyFixAction(fix.Message, diag.Category, loc)
 		}
 	}
+
 	return nil
 }
 
@@ -1245,11 +1246,14 @@ func toggleCompilerOptDetails(ctx context.Context, req *codeActionsRequest) erro
 	return nil
 }
 
-// (this function is unused)
 func refactorMoveType(_ context.Context, req *codeActionsRequest) error {
+	if !req.snapshot.Options().MoveType {
+		return nil
+	}
 	curSel, _ := req.pgf.Cursor().FindByPos(req.start, req.end)
-	if _, _, _, typeName, ok := selectionContainsType(curSel); ok {
-		cmd := command.NewMoveTypeCommand(fmt.Sprintf("Move type %s", typeName), command.MoveTypeArgs{Location: req.loc})
+	if specCur, ok := selectionContainsTypeSpec(curSel); ok {
+		spec := specCur.Node().(*ast.TypeSpec)
+		cmd := command.NewMoveTypeCommand(fmt.Sprintf("Move type %s", spec.Name.Name), command.MoveTypeArgs{Location: req.loc})
 		req.addCommandAction(cmd, false)
 	}
 	return nil

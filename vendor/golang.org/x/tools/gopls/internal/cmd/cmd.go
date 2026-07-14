@@ -30,12 +30,12 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol/semtok"
 	"golang.org/x/tools/gopls/internal/server"
 	"golang.org/x/tools/gopls/internal/settings"
+	"golang.org/x/tools/gopls/internal/tool"
 	"golang.org/x/tools/gopls/internal/util/browser"
-	bugpkg "golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/moreslices"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/jsonrpc2"
-	"golang.org/x/tools/internal/tool"
 )
 
 // Application is the main application as passed to tool.Main
@@ -132,7 +132,7 @@ features can also be accessed via the gopls command-line interface.
 
 For documentation of all its features, see:
 
-   https://github.com/golang/tools/blob/master/gopls/doc/features
+   https://go.dev/gopls/features
 
 Usage:
   gopls help [<subject>]
@@ -266,7 +266,6 @@ func (app *Application) mainCommands() []tool.Application {
 	return []tool.Application{
 		&app.Serve,
 		&version{app: app},
-		&bug{app: app},
 		&help{app: app},
 		&apiJSON{app: app},
 		&licenses{app: app},
@@ -287,15 +286,13 @@ func (app *Application) featureCommands() []tool.Application {
 		&codelens{app: app},
 		&definition{app: app},
 		&execute{app: app},
-		&fix{app: app}, // (non-functional)
 		&foldingRanges{app: app},
 		&format{app: app},
 		&headlessMCP{app: app},
 		&highlight{app: app},
 		&implementation{app: app},
 		&imports{app: app},
-		newRemote(app, ""),
-		newRemote(app, "inspect"),
+		newRemote(app),
 		&links{app: app},
 		&prepareRename{app: app},
 		&references{app: app},
@@ -906,7 +903,7 @@ func (f *cmdFile) spanRange(s span) (protocol.Range, error) {
 	// requires querying the file system, and we don't want
 	// to do that.
 	if !strings.EqualFold(f.mapper.URI.Base(), s.URI().Base()) {
-		return protocol.Range{}, bugpkg.Errorf("mapper is for file %q instead of %q", f.mapper.URI, s.URI())
+		return protocol.Range{}, bug.Errorf("mapper is for file %q instead of %q", f.mapper.URI, s.URI())
 	}
 	start, err := pointPosition(f.mapper, s.Start())
 	if err != nil {
@@ -928,18 +925,4 @@ func pointPosition(m *protocol.Mapper, p point) (protocol.Position, error) {
 		return m.OffsetPosition(p.Offset())
 	}
 	return protocol.Position{}, fmt.Errorf("point has neither offset nor line/column")
-}
-
-// TODO(adonovan): delete in 2025.
-type fix struct{ app *Application }
-
-func (*fix) Name() string       { return "fix" }
-func (cmd *fix) Parent() string { return cmd.app.Name() }
-func (*fix) Usage() string      { return "" }
-func (*fix) ShortHelp() string  { return "apply suggested fixes (obsolete)" }
-func (*fix) DetailedHelp(flags *flag.FlagSet) {
-	fmt.Fprintf(flags.Output(), `No longer supported; use "gopls codeaction" instead.`)
-}
-func (*fix) Run(ctx context.Context, args ...string) error {
-	return tool.CommandLineErrorf(`no longer supported; use "gopls codeaction" instead`)
 }

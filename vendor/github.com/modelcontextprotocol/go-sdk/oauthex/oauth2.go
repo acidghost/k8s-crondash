@@ -4,19 +4,19 @@
 
 // Package oauthex implements extensions to OAuth2.
 
-//go:build mcp_go_client_oauth
-
 package oauthex
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/internal/json"
+	"github.com/modelcontextprotocol/go-sdk/internal/util"
 )
 
 type httpStatusError struct {
@@ -64,6 +64,7 @@ func getJSON[T any](ctx context.Context, c *http.Client, url string, limit int64
 // checkURLScheme ensures that its argument is a valid URL with a scheme
 // that prevents XSS attacks.
 // See #526.
+// Note: a copy of this function exists in auth/extauth/oidc_login.go; keep these in sync.
 func checkURLScheme(u string) error {
 	if u == "" {
 		return nil
@@ -75,6 +76,20 @@ func checkURLScheme(u string) error {
 	scheme := strings.ToLower(uu.Scheme)
 	if scheme == "javascript" || scheme == "data" || scheme == "vbscript" {
 		return fmt.Errorf("URL has disallowed scheme %q", scheme)
+	}
+	return nil
+}
+
+func checkHTTPSOrLoopback(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	u, err := url.Parse(addr)
+	if err != nil {
+		return err
+	}
+	if !util.IsLoopback(u.Host) && u.Scheme != "https" {
+		return fmt.Errorf("URL %q does not use HTTPS or is not a loopback address", addr)
 	}
 	return nil
 }
