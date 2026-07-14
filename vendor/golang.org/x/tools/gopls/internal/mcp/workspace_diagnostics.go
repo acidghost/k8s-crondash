@@ -13,8 +13,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/tools/gopls/internal/cache"
-	"golang.org/x/tools/gopls/internal/cache/metadata"
-	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/protocol"
 )
 
@@ -25,13 +23,13 @@ type workspaceDiagnosticsParams struct {
 func (h *handler) workspaceDiagnosticsHandler(ctx context.Context, req *mcp.CallToolRequest, params workspaceDiagnosticsParams) (*mcp.CallToolResult, any, error) {
 	countGoDiagnosticsMCP.Inc()
 	var (
-		fh       file.Handle
 		snapshot *cache.Snapshot
 		release  func()
 		err      error
 	)
 	if len(params.Files) > 0 {
-		fh, snapshot, release, err = h.fileOf(ctx, params.Files[0])
+		// This assumes that all files belong to the same view.
+		_, snapshot, release, err = h.fileOf(ctx, params.Files[0])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -47,14 +45,7 @@ func (h *handler) workspaceDiagnosticsHandler(ctx context.Context, req *mcp.Call
 	}
 	defer release()
 
-	pkgMap := snapshot.WorkspacePackages()
-	var ids []metadata.PackageID
-	for id := range pkgMap.All() {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-
-	diagnostics, err := snapshot.PackageDiagnostics(ctx, ids...)
+	diagnostics, err := snapshot.PackageDiagnostics(ctx, slices.Collect(snapshot.WorkspacePackages().Keys())...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("diagnostics failed: %v", err)
 	}
@@ -67,13 +58,12 @@ func (h *handler) workspaceDiagnosticsHandler(ctx context.Context, req *mcp.Call
 		if err != nil {
 			return nil, nil, fmt.Errorf("diagnostics failed: %v", err)
 		}
-		diagnostics[fh.URI()] = fileDiagnostics
-		maps.Insert(fixes, maps.All(fileFixes))
+		diagnostics[uri] = fileDiagnostics
+		maps.Copy(fixes, fileFixes)
 	}
 
-	keys := slices.Sorted(maps.Keys(diagnostics))
 	var b strings.Builder
-	for _, uri := range keys {
+	for _, uri := range slices.Sorted(maps.Keys(diagnostics)) {
 		diags := diagnostics[uri]
 		if len(diags) > 0 {
 			fmt.Fprintf(&b, "File `%s` has the following diagnostics:\n", uri.Path())
@@ -83,7 +73,6 @@ func (h *handler) workspaceDiagnosticsHandler(ctx context.Context, req *mcp.Call
 			fmt.Fprintln(&b)
 		}
 	}
-
 	if b.Len() == 0 {
 		return textResult("No diagnostics."), nil, nil
 	}

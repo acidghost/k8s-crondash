@@ -166,7 +166,8 @@ outer:
 		if typesinternal.IsFunctionNamed(obj, "fmt", "Print", "Printf", "Println", "Fprint", "Fprintf", "Fprintln") ||
 			typesinternal.IsMethodNamed(obj, "bytes", "Buffer", "Write", "WriteByte", "WriteRune", "WriteString") ||
 			typesinternal.IsMethodNamed(obj, "strings", "Builder", "Write", "WriteByte", "WriteRune", "WriteString") ||
-			typesinternal.IsFunctionNamed(obj, "io", "WriteString") {
+			typesinternal.IsFunctionNamed(obj, "io", "WriteString") ||
+			typesinternal.IsMethodNamed(obj, "hash/maphash", "Hash", "Write", "WriteByte", "WriteString") {
 			continue
 		}
 
@@ -199,8 +200,14 @@ outer:
 func funcTypeParams(info *types.Info, pgf *parsego.File, qual types.Qualifier, cur inspector.Cursor, add func(protocol.InlayHint)) {
 	for curCall := range cur.Preorder((*ast.CallExpr)(nil)) {
 		call := curCall.Node().(*ast.CallExpr)
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok {
+		var id *ast.Ident
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			id = fun
+		case *ast.SelectorExpr: // imported function
+			id = fun.Sel
+		}
+		if id == nil {
 			continue
 		}
 		inst := info.Instances[id]
@@ -213,7 +220,7 @@ func funcTypeParams(info *types.Info, pgf *parsego.File, qual types.Qualifier, c
 		}
 		var args []string
 		for t := range inst.TypeArgs.Types() {
-			args = append(args, t.String())
+			args = append(args, types.TypeString(t, qual))
 		}
 		if len(args) == 0 {
 			continue
@@ -227,31 +234,18 @@ func funcTypeParams(info *types.Info, pgf *parsego.File, qual types.Qualifier, c
 }
 
 func assignVariableTypes(info *types.Info, pgf *parsego.File, qual types.Qualifier, cur inspector.Cursor, add func(protocol.InlayHint)) {
-	for node := range cur.Preorder((*ast.AssignStmt)(nil), (*ast.ValueSpec)(nil)) {
-		switch n := node.Node().(type) {
+	for cur := range cur.Preorder((*ast.AssignStmt)(nil), (*ast.ValueSpec)(nil)) {
+		switch node := cur.Node().(type) {
 		case *ast.AssignStmt:
-			if n.Tok != token.DEFINE {
-				continue
-			}
-			for _, v := range n.Lhs {
-				variableType(info, pgf, qual, v, add)
-			}
-		case *ast.GenDecl:
-			if n.Tok != token.VAR {
-				continue
-			}
-			for _, v := range n.Specs {
-				spec := v.(*ast.ValueSpec)
-				// The type of the variable is written, skip showing type of this var.
-				// ```go
-				// var foo string
-				// ```
-				if spec.Type != nil {
-					continue
+			if node.Tok == token.DEFINE {
+				for _, lhs := range node.Lhs {
+					variableType(info, pgf, qual, lhs, add)
 				}
-
-				for _, v := range spec.Names {
-					variableType(info, pgf, qual, v, add)
+			}
+		case *ast.ValueSpec:
+			if cur.Parent().Node().(*ast.GenDecl).Tok == token.VAR && node.Type == nil { // type not already explicit
+				for _, id := range node.Names {
+					variableType(info, pgf, qual, id, add)
 				}
 			}
 		}
@@ -336,43 +330,71 @@ func constantValues(info *types.Info, pgf *parsego.File, qual types.Qualifier, c
 
 func compositeLiteralFields(info *types.Info, pgf *parsego.File, qual types.Qualifier, cur inspector.Cursor, add func(protocol.InlayHint)) {
 	for curCompLit := range cur.Preorder((*ast.CompositeLit)(nil)) {
-		compLit, ok := curCompLit.Node().(*ast.CompositeLit)
-		if !ok {
-			continue
-		}
+		compLit := curCompLit.Node().(*ast.CompositeLit)
 		typ := info.TypeOf(compLit)
 		if typ == nil {
 			continue
 		}
-		typ = typesinternal.Unpointer(typ)
-		strct, ok := typeparams.CoreType(typ).(*types.Struct)
+		strct, ok := typeparams.CoreType(typesinternal.Unpointer(typ)).(*types.Struct)
 		if !ok {
 			continue
 		}
 
-		var hints []protocol.InlayHint
-		var allEdits []protocol.TextEdit
+		var (
+			hints    []protocol.InlayHint
+			allEdits []protocol.TextEdit
+			label    strings.Builder
+		)
 		for i, v := range compLit.Elts {
-			if _, ok := v.(*ast.KeyValueExpr); !ok {
-				start, err := pgf.PosPosition(v.Pos())
-				if err != nil {
-					continue
+			label.Reset()
+			pad := false
+			if kv, ok := v.(*ast.KeyValueExpr); ok {
+				// keyed field: show implicit field selections
+				if id, ok := kv.Key.(*ast.Ident); ok {
+					// For some reason an inlayHintFunc
+					// doesn't get the current types.Package.
+					// Use the package of the explicit field.
+					var pkg *types.Package
+					if obj, ok := info.Uses[id]; ok {
+						pkg = obj.Pkg()
+					}
+
+					if seln, ok := types.LookupSelection(strct, true, pkg, id.Name); ok {
+						for field := range typesinternal.ImplicitFieldSelections(seln) {
+							label.WriteString(field.Name())
+							label.WriteByte('.')
+						}
+					}
 				}
-				if i > strct.NumFields()-1 {
-					break
+			} else {
+				// unkeyed field: show key based on index
+				if i < strct.NumFields() {
+					label.WriteString(strct.Field(i).Name())
+					label.WriteByte(':')
+					pad = true
 				}
-				hints = append(hints, protocol.InlayHint{
-					Position:     start,
-					Label:        labelPart(strct.Field(i).Name() + ":"),
-					Kind:         protocol.Parameter,
-					PaddingRight: true,
-				})
-				allEdits = append(allEdits, protocol.TextEdit{
-					Range:   protocol.Range{Start: start, End: start},
-					NewText: strct.Field(i).Name() + ": ",
-				})
 			}
+			if label.Len() == 0 {
+				continue
+			}
+			labelStr := label.String()
+
+			start, err := pgf.PosPosition(v.Pos())
+			if err != nil {
+				continue
+			}
+			hints = append(hints, protocol.InlayHint{
+				Position:     start,
+				Label:        labelPart(labelStr),
+				Kind:         protocol.Parameter,
+				PaddingRight: pad,
+			})
+			allEdits = append(allEdits, protocol.TextEdit{
+				Range:   protocol.Range{Start: start, End: start},
+				NewText: labelStr,
+			})
 		}
+
 		// It is not allowed to have a mix of keyed and unkeyed fields, so
 		// have the text edits add keys to all fields.
 		for i := range hints {
