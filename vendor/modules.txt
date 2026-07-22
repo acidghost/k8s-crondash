@@ -42,7 +42,7 @@ github.com/a-h/templ/parser/v2/goexpression
 github.com/a-h/templ/parser/v2/visitor
 github.com/a-h/templ/runtime
 github.com/a-h/templ/safehtml
-# github.com/alecthomas/kong v1.15.0
+# github.com/alecthomas/kong v1.16.0
 ## explicit; go 1.20
 github.com/alecthomas/kong
 # github.com/andybalholm/brotli v1.2.2
