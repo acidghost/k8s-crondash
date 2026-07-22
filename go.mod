@@ -6,7 +6,7 @@ toolchain go1.26.5
 
 require (
 	github.com/a-h/templ v0.3.1020
-	github.com/alecthomas/kong v1.15.0
+	github.com/alecthomas/kong v1.16.0
 	github.com/gofiber/fiber/v3 v3.4.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.2
