@@ -7,6 +7,7 @@ container_image := container_registry + '/acidghost/' + program
 version := 'SNAPSHOT-'+`git describe --tags --always --dirty 2>/dev/null || printf 'unknown'`
 commit_sha := `(git rev-parse HEAD 2>/dev/null || printf 'unknown') | tr -d '\n'`
 build_time := `date -u '+%Y-%m-%d_%H:%M:%S'`
+install_prefix := `go env GOBIN`
 
 ldflags := '-s -w -X main.buildVersion='+version \
         +' -X main.buildCommit='+commit_sha \
@@ -83,7 +84,7 @@ test:
     go test -race -coverprofile=coverage.txt ./...
 
 install: build
-    cp -v './build/{{program}}-{{goos}}-{{goarch}}' "$(go env GOBIN)/{{program}}"
+    cp -v './build/{{program}}-{{goos}}-{{goarch}}' "{{install_prefix}}/{{program}}"
 
 clean:
     rm -rf build
