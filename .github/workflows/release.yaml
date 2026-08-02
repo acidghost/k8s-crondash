@@ -145,21 +145,24 @@ jobs:
           docker buildx imagetools inspect "$reference" --format '{{ json .Provenance }}' > provenance.json
           docker buildx imagetools inspect "$reference" --format '{{ json .SBOM }}' > sbom.json
 
-          jq -e \
-            --arg commit "$GITHUB_SHA" \
-            --arg source "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --arg version "$VERSION" '
-              .SLSA |
-              .buildDefinition.buildType ==
-                "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md" and
-              .buildDefinition.externalParameters.request.root.request.args["build-arg:BUILD_COMMIT"] == $commit and
-              .buildDefinition.externalParameters.request.root.request.args["build-arg:BUILD_VERSION"] == $version and
-              .buildDefinition.externalParameters.request.root.request.args["vcs:source"] == $source and
-              (.runDetails.builder.id | type == "string" and length > 0)
-            ' provenance.json >/dev/null
+          for platform in linux/amd64 linux/arm64; do
+            jq -e \
+              --arg platform "$platform" \
+              --arg commit "$GITHUB_SHA" \
+              --arg source "https://github.com/${GITHUB_REPOSITORY}" \
+              --arg version "$VERSION" '
+                .[$platform].SLSA |
+                .buildDefinition.buildType ==
+                  "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md" and
+                .buildDefinition.externalParameters.request.root.request.args["build-arg:BUILD_COMMIT"] == $commit and
+                .buildDefinition.externalParameters.request.root.request.args["build-arg:BUILD_VERSION"] == $version and
+                .buildDefinition.externalParameters.request.root.request.args["vcs:source"] == $source and
+                (.runDetails.builder.id | type == "string" and length > 0)
+              ' provenance.json >/dev/null
 
-          output="sbom-linux-amd64.spdx.json"
-          jq -e '.SPDX' sbom.json > "$output"
+            output="sbom-${platform//\//-}.spdx.json"
+            jq -e --arg platform "$platform" '.[$platform].SPDX' sbom.json > "$output"
+          done
 
       - name: Sign image and attest platform SBOMs by digest
         env:
@@ -169,8 +172,9 @@ jobs:
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           reference="${IMAGE_REPOSITORY}@${DIGEST}"
           cosign sign --yes "$reference"
-          cosign attest --yes --type spdxjson \
-            --predicate sbom-linux-amd64.spdx.json "$reference"
+          for predicate in sbom-linux-amd64.spdx.json sbom-linux-arm64.spdx.json; do
+            cosign attest --yes --type spdxjson --predicate "$predicate" "$reference"
+          done
 
       - name: Verify image signature and signed SBOM attestations
         env:
@@ -192,7 +196,10 @@ jobs:
             --type spdxjson \
             "$reference" > verified-sbom-attestations.jsonl
 
-          expected_namespaces="$(jq -s 'map(.documentNamespace) | sort' sbom-linux-amd64.spdx.json)"
+          expected_namespaces="$(
+            jq -s 'map(.documentNamespace) | sort' \
+              sbom-linux-amd64.spdx.json sbom-linux-arm64.spdx.json
+          )"
           jq -s -e --argjson expected "$expected_namespaces" '
             map(.payload | @base64d | fromjson) |
             map(
