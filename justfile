@@ -60,11 +60,19 @@ helm-conform:
     helm template {{helm_flags}} {{program}} deploy/charts/{{program}} \
         | kubeconform -summary
 
-helm-package:
-    helm package -d build deploy/charts/{{program}}
+helm-package version='0.0.0': build-dir
+    release_version='{{version}}'; release_version="${release_version#version=}"; \
+        helm package \
+            --destination build \
+            --version "$release_version" \
+            --app-version "$release_version" \
+            deploy/charts/{{program}}
 
-helm-push: helm-package
-    helm push build/{{program}}-0.0.0.tgz oci://{{container_registry}}/acidghost/charts
+helm-push version:
+    release_version='{{version}}'; release_version="${release_version#version=}"; \
+        archive="build/{{program}}-${release_version}.tgz"; \
+        if [[ ! -f "$archive" ]]; then just helm-package "$release_version"; fi; \
+        helm push "$archive" 'oci://{{container_registry}}/acidghost/charts'
 
 actions-lint *args:
     actionlint -verbose {{args}}
