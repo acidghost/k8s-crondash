@@ -2,8 +2,11 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/acidghost/k8s-crondash
-  tag: latest
-  pullPolicy: Always
+  # An empty tag uses the immutable chart appVersion.
+  tag: ""
+  # When set, digest takes precedence over tag (for example sha256:...).
+  digest: ""
+  pullPolicy: IfNotPresent
 
 service:
   port: 3000
