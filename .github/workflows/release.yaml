@@ -13,7 +13,7 @@ permissions: {}
 
 env:
   # renovate: datasource=github-releases depName=jdx/mise
-  MISE_VERSION: 2026.7.7
+  MISE_VERSION: 2026.7.14
   IMAGE_REPOSITORY: ghcr.io/acidghost/k8s-crondash
   CHART_REPOSITORY: ghcr.io/acidghost/charts/k8s-crondash
 
