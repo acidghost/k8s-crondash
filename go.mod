@@ -6,9 +6,9 @@ require (
 	github.com/a-h/templ v0.3.1020
 	github.com/alecthomas/kong v1.16.0
 	github.com/gofiber/fiber/v3 v3.4.0
-	k8s.io/api v0.36.3
-	k8s.io/apimachinery v0.36.3
-	k8s.io/client-go v0.36.3
+	k8s.io/api v0.36.4
+	k8s.io/apimachinery v0.36.4
+	k8s.io/client-go v0.36.4
 )
 
 require (
@@ -65,7 +65,7 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
 	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.47.1-0.20260707181000-a299dadba899 // indirect
 	golang.org/x/tools/gopls v0.23.0 // indirect
