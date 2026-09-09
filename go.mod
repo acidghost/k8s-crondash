@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/a-h/templ v0.3.1020
-	github.com/alecthomas/kong v1.16.0
+	github.com/alecthomas/kong v1.16.1
 	github.com/gofiber/fiber/v3 v3.4.0
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
