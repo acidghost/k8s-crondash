@@ -5,8 +5,8 @@ github.com/BurntSushi/toml/internal
 # github.com/a-h/parse v0.0.0-20250122154542-74294addb73e
 ## explicit; go 1.18
 github.com/a-h/parse
-# github.com/a-h/templ v0.3.1020
-## explicit; go 1.25.0
+# github.com/a-h/templ v0.3.1070
+## explicit; go 1.26.0
 github.com/a-h/templ
 github.com/a-h/templ/cmd/templ
 github.com/a-h/templ/cmd/templ/fmtcmd
@@ -27,6 +27,7 @@ github.com/a-h/templ/cmd/templ/visualize
 github.com/a-h/templ/generator
 github.com/a-h/templ/internal/format
 github.com/a-h/templ/internal/htmlfind
+github.com/a-h/templ/internal/ignorefile
 github.com/a-h/templ/internal/imports
 github.com/a-h/templ/internal/lazyloader
 github.com/a-h/templ/internal/prettier
@@ -45,10 +46,9 @@ github.com/a-h/templ/safehtml
 # github.com/alecthomas/kong v1.16.1
 ## explicit; go 1.20
 github.com/alecthomas/kong
-# github.com/andybalholm/brotli v1.2.2
+# github.com/andybalholm/brotli v1.2.6
 ## explicit; go 1.22
 github.com/andybalholm/brotli
-github.com/andybalholm/brotli/flate
 github.com/andybalholm/brotli/matchfinder
 # github.com/cenkalti/backoff/v4 v4.3.0
 ## explicit; go 1.18
@@ -66,8 +66,8 @@ github.com/emicklei/go-restful/v3/log
 # github.com/fatih/camelcase v1.0.0
 ## explicit
 github.com/fatih/camelcase
-# github.com/fatih/color v1.16.0
-## explicit; go 1.17
+# github.com/fatih/color v1.19.0
+## explicit; go 1.25.0
 github.com/fatih/color
 # github.com/fatih/gomodifytags v1.17.1-0.20250423142747-f3939df9aa3c
 ## explicit; go 1.13
@@ -75,8 +75,8 @@ github.com/fatih/gomodifytags/modifytags
 # github.com/fatih/structtag v1.2.0
 ## explicit; go 1.12
 github.com/fatih/structtag
-# github.com/fsnotify/fsnotify v1.9.0
-## explicit; go 1.17
+# github.com/fsnotify/fsnotify v1.10.1
+## explicit; go 1.23
 github.com/fsnotify/fsnotify
 github.com/fsnotify/fsnotify/internal
 # github.com/fxamacker/cbor/v2 v2.9.2
@@ -236,8 +236,8 @@ go.yaml.in/yaml/v2
 # go.yaml.in/yaml/v3 v3.0.4
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
-# golang.org/x/crypto v0.54.0
-## explicit; go 1.25.0
+# golang.org/x/crypto v0.57.0
+## explicit; go 1.26.0
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
 golang.org/x/crypto/bcrypt
@@ -245,14 +245,14 @@ golang.org/x/crypto/blowfish
 # golang.org/x/exp/typeparams v0.0.0-20260611194520-c48552f49976
 ## explicit; go 1.25.0
 golang.org/x/exp/typeparams
-# golang.org/x/mod v0.37.0
-## explicit; go 1.25.0
+# golang.org/x/mod v0.41.0
+## explicit; go 1.26.0
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.57.0
-## explicit; go 1.25.0
+# golang.org/x/net v0.59.0
+## explicit; go 1.26.0
 golang.org/x/net/html
 golang.org/x/net/html/atom
 golang.org/x/net/http/httpguts
@@ -265,17 +265,17 @@ golang.org/x/net/internal/httpsfv
 ## explicit; go 1.25.0
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
-# golang.org/x/sync v0.22.0
-## explicit; go 1.25.0
+# golang.org/x/sync v0.23.0
+## explicit; go 1.26.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.47.0
-## explicit; go 1.25.0
+# golang.org/x/sys v0.48.0
+## explicit; go 1.26.0
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57
-## explicit; go 1.25.0
+# golang.org/x/telemetry v0.0.0-20260924152758-ed294f943157
+## explicit; go 1.26.0
 golang.org/x/telemetry
 golang.org/x/telemetry/counter
 golang.org/x/telemetry/internal/config
@@ -285,11 +285,11 @@ golang.org/x/telemetry/internal/crashmonitor
 golang.org/x/telemetry/internal/mmap
 golang.org/x/telemetry/internal/telemetry
 golang.org/x/telemetry/internal/upload
-# golang.org/x/term v0.45.0
-## explicit; go 1.25.0
+# golang.org/x/term v0.46.0
+## explicit; go 1.26.0
 golang.org/x/term
-# golang.org/x/text v0.40.0
-## explicit; go 1.25.0
+# golang.org/x/text v0.42.0
+## explicit; go 1.26.0
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
@@ -298,8 +298,8 @@ golang.org/x/text/unicode/runenames
 # golang.org/x/time v0.14.0
 ## explicit; go 1.24.0
 golang.org/x/time/rate
-# golang.org/x/tools v0.47.1-0.20260707181000-a299dadba899
-## explicit; go 1.25.0
+# golang.org/x/tools v0.51.0
+## explicit; go 1.26.0
 golang.org/x/tools/go/analysis
 golang.org/x/tools/go/analysis/passes/appends
 golang.org/x/tools/go/analysis/passes/asmdecl
@@ -372,9 +372,9 @@ golang.org/x/tools/go/ssa/ssautil
 golang.org/x/tools/go/types/objectpath
 golang.org/x/tools/go/types/typeutil
 golang.org/x/tools/imports
-golang.org/x/tools/internal/aliases
 golang.org/x/tools/internal/analysis/analyzerutil
 golang.org/x/tools/internal/analysis/driverutil
+golang.org/x/tools/internal/analysis/intconv
 golang.org/x/tools/internal/analysis/typeindex
 golang.org/x/tools/internal/astutil
 golang.org/x/tools/internal/astutil/free
@@ -400,6 +400,7 @@ golang.org/x/tools/internal/jsonrpc2
 golang.org/x/tools/internal/jsonrpc2_v2
 golang.org/x/tools/internal/modindex
 golang.org/x/tools/internal/moreiters
+golang.org/x/tools/internal/moremaps
 golang.org/x/tools/internal/packagepath
 golang.org/x/tools/internal/packagesinternal
 golang.org/x/tools/internal/pkgbits
