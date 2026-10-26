@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/gopls/internal/cache"
-	"golang.org/x/tools/gopls/internal/util/morestrings"
 )
 
 // AssemblyHTML returns an HTML document containing an assembly listing of the selected function.
@@ -116,14 +115,15 @@ func AssemblyHTML(ctx context.Context, snapshot *cache.Snapshot, w http.Response
 		// replace the "(/file.go:123)" portion with an "L0123" source link.
 		// Skip filenames of the form "<foo>".
 		if parts := insnRx.FindStringSubmatch(line); parts != nil {
-			link := "     " // if unknown
-			if file, linenum, ok := morestrings.CutLast(parts[2], ":"); ok && !strings.HasPrefix(file, "<") {
+			linkHTML := template.HTML("     ") // if unknown
+			if file, linenum, ok := strings.CutLast(parts[2], ":"); ok && !strings.HasPrefix(file, "<") {
 				if linenum, err := strconv.Atoi(linenum); err == nil {
-					text := fmt.Sprintf("L%04d", linenum)
-					link = sourceLink(text, web.SrcURL(file, linenum, 1))
+					linkHTML = sourceLinkHTML(
+						template.HTML(fmt.Sprintf("L%04d", linenum)),
+						web.SrcURL(file, linenum, 1))
 				}
 			}
-			fmt.Fprintf(&buf, "%s\t%s\t%s", escape(parts[1]), link, escape(parts[3]))
+			fmt.Fprintf(&buf, "%s\t%s\t%s", escape(parts[1]), linkHTML, escape(parts[3]))
 		} else {
 			buf.WriteString(escape(line))
 		}

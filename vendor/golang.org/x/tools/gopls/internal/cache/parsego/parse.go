@@ -507,6 +507,8 @@ func fixInitStmt(bad *ast.BadExpr, parent ast.Node, tok *token.File, src []byte)
 		return false
 	}
 
+	fileBase := token.Pos(tok.Base())
+
 	// If the parent statement doesn't already have an "init" statement,
 	// move the extracted statement into the "init" field and insert a
 	// dummy expression into the required "cond" field.
@@ -518,7 +520,7 @@ func fixInitStmt(bad *ast.BadExpr, parent ast.Node, tok *token.File, src []byte)
 		p.Init = stmt
 		p.Cond = &ast.Ident{
 			Name:    "_",
-			NamePos: stmt.End(),
+			NamePos: min(stmt.End(), max(fileBase, tok.End()-1)),
 		}
 		return true
 	case *ast.ForStmt:
@@ -528,7 +530,7 @@ func fixInitStmt(bad *ast.BadExpr, parent ast.Node, tok *token.File, src []byte)
 		p.Init = stmt
 		p.Cond = &ast.Ident{
 			Name:    "_",
-			NamePos: stmt.End(),
+			NamePos: min(stmt.End(), max(fileBase, tok.End()-1)),
 		}
 		return true
 	case *ast.SwitchStmt:
@@ -810,9 +812,16 @@ func parseStmt(tok *token.File, pos token.Pos, src []byte) (ast.Stmt, error) {
 
 	stmt := fakeDecl.Body.List[0]
 
+	// Clamp pos so the entire snippet fits within the valid position range of tok.
+	// This ensures that no node or token in stmt exceeds tok.End().
+	// See go.dev/issue/{73438,66790,66683,67704}.
+	fileBase := token.Pos(tok.Base())
+	maxPos := max(fileBase, tok.End()-token.Pos(len(src)))
+	pos = min(max(pos, fileBase), maxPos)
+
 	// parser.ParseFile returns undefined positions.
 	// Adjust them for the current file.
-	offsetPositions(tok, stmt, pos-1-(stmt.Pos()-1))
+	offsetPositions(tok, stmt, pos-stmt.Pos())
 
 	return stmt, nil
 }
@@ -835,10 +844,11 @@ func parseExpr(tok *token.File, pos token.Pos, src []byte) (ast.Expr, error) {
 
 var tokenPosType = reflect.TypeFor[token.Pos]()
 
-// offsetPositions applies an offset to the positions in an ast.Node.
+// offsetPositions applies an offset to the positions in an ast.Node,
+// clamping positions to the valid range [fileBase, fileEnd] of tok.
 func offsetPositions(tok *token.File, n ast.Node, offset token.Pos) {
 	fileBase := token.Pos(tok.Base())
-	fileEnd := fileBase + token.Pos(tok.Size())
+	fileEnd := tok.End()
 	ast.Inspect(n, func(n ast.Node) bool {
 		if n == nil {
 			return false
@@ -866,10 +876,6 @@ func offsetPositions(tok *token.File, n ast.Node, offset token.Pos) {
 				}
 
 				// Clamp value to valid range; see #64335.
-				//
-				// TODO(golang/go#64335): this is a hack, because our fixes should not
-				// produce positions that overflow (but they do; see golang/go#64488,
-				// #73438, #66790, #66683, #67704).
 				pos = min(max(pos+offset, fileBase), fileEnd)
 
 				f.SetInt(int64(pos))
@@ -910,9 +916,7 @@ func replaceNode(parent, oldChild, newChild ast.Node) bool {
 	}
 
 	// Loop over parent's struct fields.
-	for i := 0; i < parentVal.NumField(); i++ {
-		f := parentVal.Field(i)
-
+	for _, f := range parentVal.Fields() {
 		switch f.Kind() {
 		// Check interface and pointer fields.
 		case reflect.Interface, reflect.Pointer:

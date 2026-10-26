@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	runtimedebug "runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -34,10 +35,10 @@ import (
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/goversion"
-	"golang.org/x/tools/gopls/internal/util/moremaps"
-	"golang.org/x/tools/gopls/internal/util/moreslices"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
+	"golang.org/x/tools/internal/moremaps"
+	"golang.org/x/tools/internal/moreslices"
 )
 
 func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
@@ -71,9 +72,7 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 	}
 	options.ForClientCapabilities(params.ClientInfo, params.Capabilities)
 
-	if options.MaxFileCacheBytes > 0 {
-		filecache.SetBudget(options.MaxFileCacheBytes)
-	}
+	updateGlobalOptions(options)
 
 	if options.ShowBugReports {
 		// Report the next bug that occurs on the server.
@@ -275,6 +274,17 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 			Version: string(goplsVersion),
 		},
 	}, nil
+}
+
+// updateGlobalOptions updates process-wide settings
+// received by a DidChangeConfiguration or Initialize request.
+func updateGlobalOptions(options *settings.Options) {
+	if options.MaxFileCacheBytes > 0 {
+		filecache.SetBudget(options.MaxFileCacheBytes)
+	}
+	if options.MemoryLimit > 0 {
+		runtimedebug.SetMemoryLimit(options.MemoryLimit)
+	}
 }
 
 func (s *server) Initialized(ctx context.Context, params *protocol.InitializedParams) error {
@@ -786,6 +796,13 @@ func (s *server) Shutdown(ctx context.Context) error {
 			s.web.server.Shutdown(ctx) // ignore error
 		}
 
+		s.modificationMu.Lock()
+		if s.cancelPrevDiagnostics != nil {
+			s.cancelPrevDiagnostics()
+			s.cancelPrevDiagnostics = nil
+		}
+		s.modificationMu.Unlock()
+
 		// drop all the active views
 		s.session.Shutdown(ctx)
 		s.state = serverShutDown
@@ -828,6 +845,9 @@ func recordClientInfo(clientName string) {
 
 		// https://lists.gnu.org/archive/html/bug-gnu-emacs/2023-03/msg00954.html
 		{"Eglot", "gopls/client:eglot"},
+
+		// https://github.com/emacs-lsp/lsp-mode/blob/master/lsp-mode.el#L8320
+		{"emacs", "gopls/client:lsp-mode"},
 
 		// https://github.com/govim/govim/pull/1189
 		{"govim", "gopls/client:govim"},
