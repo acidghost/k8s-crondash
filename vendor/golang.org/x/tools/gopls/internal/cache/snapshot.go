@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"os"
@@ -39,13 +38,14 @@ import (
 	"golang.org/x/tools/gopls/internal/util/constraints"
 	"golang.org/x/tools/gopls/internal/util/immutable"
 	"golang.org/x/tools/gopls/internal/util/memoize"
-	"golang.org/x/tools/gopls/internal/util/moremaps"
 	"golang.org/x/tools/gopls/internal/util/pathutil"
 	"golang.org/x/tools/gopls/internal/util/persistent"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/label"
 	"golang.org/x/tools/internal/gocommand"
+	"golang.org/x/tools/internal/moreiters"
+	"golang.org/x/tools/internal/moremaps"
 )
 
 // A Snapshot represents the current state for a given view.
@@ -157,6 +157,9 @@ type Snapshot struct {
 	shouldLoad *persistent.Map[PackageID, []PackagePath]
 
 	// unloadableFiles keeps track of files that we've failed to load.
+	//
+	// A file leaves this set when it changes in a way that affects metadata, or
+	// when the workspace is reinitialized: both can make the file loadable.
 	unloadableFiles *persistent.Set[protocol.DocumentURI]
 
 	// TODO(rfindley): rename the handles below to "promises". A promise is
@@ -294,12 +297,10 @@ func (s *Snapshot) FileKind(fh file.Handle) file.Kind {
 		}
 	}
 
-	// and now what? This should never happen, but it does for cgo before go1.15
-	//
-	// TODO(rfindley): this doesn't look right. We should default to UnknownKind.
-	// Also, I don't understand the comment above, though I'd guess before go1.15
-	// we encountered cgo files without the .go extension.
-	return file.Go
+	// Unrecognized file extension and not explicitly marked as Go by an overlay.
+	// We default to UnknownKind so that arbitrary non-Go files (e.g. /tmp/foof,
+	// README, Makefile) are not treated as Go packages (golang.org/issue/54815).
+	return file.UnknownKind
 }
 
 // fileKind returns the default file kind for a file, before considering
@@ -567,6 +568,8 @@ func (s *Snapshot) References(ctx context.Context, ids ...PackageID) ([]xrefInde
 	ctx, done := event.Start(ctx, "cache.snapshot.References")
 	defer done()
 
+	var enc objectpath.Encoder // amortize encoding across the batch
+
 	indexes := make([]xrefIndex, len(ids))
 	pre := func(i int, ph *packageHandle) bool {
 		if idx, ok := filecache.GetOrFatal(xrefsKind, ph.key, xrefs.Decode); ok {
@@ -576,7 +579,7 @@ func (s *Snapshot) References(ctx context.Context, ids ...PackageID) ([]xrefInde
 		return true
 	}
 	post := func(i int, pkg *Package) {
-		indexes[i] = xrefIndex{mp: pkg.metadata, idx: pkg.pkg.xrefs()}
+		indexes[i] = xrefIndex{mp: pkg.metadata, idx: pkg.pkg.xrefs(&enc)}
 	}
 	return indexes, s.forEachPackage(ctx, ids, pre, post)
 }
@@ -599,6 +602,8 @@ func (s *Snapshot) MethodSets(ctx context.Context, ids ...PackageID) ([]*methods
 	ctx, done := event.Start(ctx, "cache.snapshot.MethodSets")
 	defer done()
 
+	var enc objectpath.Encoder // amortize encoding across the batch
+
 	indexes := make([]*methodsets.Index, len(ids))
 	pre := func(i int, ph *packageHandle) bool {
 		pkgPath := ph.mp.PkgPath // capture for decode closure
@@ -611,7 +616,7 @@ func (s *Snapshot) MethodSets(ctx context.Context, ids ...PackageID) ([]*methods
 		return true
 	}
 	post := func(i int, pkg *Package) {
-		indexes[i] = pkg.pkg.methodsets()
+		indexes[i] = pkg.pkg.methodsets(&enc)
 	}
 	return indexes, s.forEachPackage(ctx, ids, pre, post)
 }
@@ -1403,11 +1408,7 @@ https://github.com/golang/tools/blob/master/gopls/doc/workspace.md.`, modDir, fi
 			if ignoredFiles[fh.URI()] {
 				// TODO(rfindley): use the constraint package to check if the file
 				// _actually_ satisfies the current build context.
-				hasConstraint := false
-				walkConstraints(pgf.File, func(constraint.Expr) bool {
-					hasConstraint = true
-					return false
-				})
+				hasConstraint := !moreiters.Empty(buildConstraints(pgf.File))
 				var fix string
 				if hasConstraint {
 					fix = `This file may be excluded due to its build tags; try adding "-tags=<build tag>" to your gopls "buildFlags" configuration
@@ -1646,6 +1647,12 @@ func (s *Snapshot) clone(ctx, bgCtx context.Context, changed StateChange, done f
 	if reinit {
 		result.initialized = false
 		needsDiagnosis = true
+		// A change to a workspace file can make an unloadable file loadable, so
+		// forget which files failed to load. Without this, MetadataForFile
+		// skips the inline load for such a file and fails until the reload
+		// that follows this change completes. Files that are still unloadable
+		// are marked again by the next load that includes them.
+		result.unloadableFiles.Clear()
 	}
 
 	// directIDs keeps track of package IDs that have directly changed.

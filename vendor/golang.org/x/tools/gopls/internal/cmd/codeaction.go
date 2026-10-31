@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/gopls/internal/protocol"
-	"golang.org/x/tools/gopls/internal/tool"
 )
 
 // codeaction implements the codeaction verb for gopls.
@@ -23,7 +22,7 @@ type codeaction struct {
 	Title string `flag:"title" help:"regular expression to match title"`
 	Exec  bool   `flag:"exec" help:"execute the first matching code action"`
 
-	app *Application
+	app *application
 }
 
 func (cmd *codeaction) Name() string      { return "codeaction" }
@@ -58,6 +57,7 @@ Valid kinds include:
 	refactor.extract.variable
 	refactor.inline
 	refactor.inline.call
+	refactor.inline.variable
 	refactor.rewrite
 	refactor.rewrite.changeQuote
 	refactor.rewrite.fillStruct
@@ -105,7 +105,7 @@ codeaction-flags:
 
 func (cmd *codeaction) Run(ctx context.Context, args ...string) error {
 	if len(args) < 1 {
-		return tool.CommandLineErrorf("codeaction expects at least 1 argument")
+		return commandLineErrorf("codeaction expects at least 1 argument")
 	}
 	cmd.app.editFlags = &cmd.EditFlags
 	cli, _, err := cmd.app.connect(ctx)

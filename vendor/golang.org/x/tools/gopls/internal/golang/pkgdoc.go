@@ -11,8 +11,7 @@ package golang
 // placeholder for a more sophisticated one.
 //
 // TODO(adonovan):
-// - rewrite using html/template.
-//   Or factor with golang.org/x/pkgsite/internal/godoc/dochtml.
+// - rewrite using html/template. No, really, let's do this.
 // - emit breadcrumbs for parent + sibling packages.
 // - list promoted methods---we have type information! (golang/go#67158)
 // - gather Example tests, following go/doc and pkgsite.
@@ -38,7 +37,7 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
-	"html"
+	"html/template"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -118,12 +117,10 @@ func DocFragment(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (p
 	if !sym.Exported() {
 		// Unexported method of exported type?
 		if fn, ok := sym.(*types.Func); ok {
-			if recv := fn.Signature().Recv(); recv != nil {
-				_, named := typesinternal.ReceiverNamed(recv)
-				if named != nil && named.Obj().Exported() {
-					sym = named.Obj()
-					goto below
-				}
+			_, named := typesinternal.RecvBase(fn)
+			if named != nil && named.Obj().Exported() {
+				sym = named.Obj()
+				goto below
 			}
 		}
 
@@ -145,8 +142,7 @@ func DocFragment(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (p
 	// Inv: sym is field or method, or local.
 	switch sym := sym.(type) {
 	case *types.Func: // => method
-		sig := sym.Signature()
-		isPtr, named := typesinternal.ReceiverNamed(sig.Recv())
+		isPtr, named := typesinternal.RecvBase(sym)
 		if named != nil {
 			if !named.Obj().Exported() {
 				return wholePackage(sym.Pkg()) // exported method of unexported type
@@ -357,7 +353,7 @@ func PackageDocHTML(viewID string, pkg *cache.Package, web Web) ([]byte, error) 
 	}
 
 	scope := pkg.Types().Scope()
-	escape := html.EscapeString
+	escape := template.HTMLEscapeString
 
 	title := fmt.Sprintf("%s package - %s - Gopls packages",
 		pkg.Types().Name(), escape(pkg.Types().Path()))
@@ -424,8 +420,7 @@ window.addEventListener('load', function() {
 	// option emits an <option> for the specified symbol.
 	//
 	// recvType is the apparent receiver type, which may
-	// differ from ReceiverNamed(obj.Signature.Recv).Name
-	// for promoted methods.
+	// differ from RecvBase(obj).Name for promoted methods.
 	option := func(obj types.Object, recvType string) {
 		// Render functions/methods as "(recv) Method(p1, ..., pN)".
 		fragment := obj.Name()
@@ -518,7 +513,7 @@ window.addEventListener('load', function() {
 				if fn, ok := obj.(*types.Func); ok {
 					sig := fn.Signature()
 					if sig.Recv() != nil {
-						_, named := typesinternal.ReceiverNamed(sig.Recv())
+						_, named := typesinternal.RecvBase(fn)
 						if named != nil {
 							fragment := named.Obj().Name() + "." + fn.Name()
 							return web.PkgURL(viewID, PackagePath(fn.Pkg().Path()), fragment)
@@ -574,7 +569,7 @@ window.addEventListener('load', function() {
 						emit(n.Pos())
 						pos = n.End()
 						if url := linkify(n); url != "" {
-							fmt.Fprintf(&buf, "<a class='id' href='%s'>%s</a>", url, escape(n.Name))
+							fmt.Fprintf(&buf, "<a class='id' href='%s'>%s</a>", escape(url), escape(n.Name))
 						} else {
 							buf.WriteString(escape(n.Name)) // plain
 						}
@@ -831,7 +826,9 @@ window.addEventListener('load', function() {
 	fmt.Fprintf(&buf, "<h2 id='hdr-SourceFiles'>Source files</h2>\n")
 	for _, filename := range docpkg.Filenames {
 		fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n",
-			sourceLink(filepath.Base(filename), web.SrcURL(filename, 1, 1)))
+			sourceLinkHTML(
+				template.HTML(template.HTMLEscapeString(filepath.Base(filename))),
+				web.SrcURL(filename, 1, 1)))
 	}
 
 	fmt.Fprintf(&buf, "</main>\n")

@@ -611,6 +611,15 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, uri protocol.
 		targets = []objectAt{{obj, cur}}
 	}
 
+	// A field selected from an instantiated generic type is represented by a
+	// synthetic *types.Var. Normalize it to the declared field so that a rename
+	// initiated at the selection updates the declaration too (golang/go#80542).
+	for i := range targets {
+		if field, ok := targets[i].obj.(*types.Var); ok && field.IsField() {
+			targets[i].obj = field.Origin()
+		}
+	}
+
 	// Pick a representative object arbitrarily.
 	// (All share the same name, pos, and kind.)
 	obj, node := targets[0].obj, targets[0].cur.Node()
@@ -654,8 +663,6 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, uri protocol.
 		case *types.Func:
 			obj = obj0.Origin()
 		case *types.Var:
-			// TODO(adonovan): do vars need the origin treatment too? (issue #58462)
-
 			// Function parameter and result vars that are (unusually)
 			// capitalized are technically exported, even though they
 			// cannot be referenced, because they may affect downstream
@@ -697,17 +704,10 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, uri protocol.
 		// intent for the broader renaming; renaming a use of
 		// the receiver effects only the local renaming.
 		if id, ok := cur.Node().(*ast.Ident); ok && id.Pos() == obj.Pos() {
-			// enclosing func
-			if decl, _ := cursorutil.FirstEnclosing[*ast.FuncDecl](cur); decl != nil {
-				if decl.Recv != nil &&
-					len(decl.Recv.List) > 0 &&
-					len(decl.Recv.List[0].Names) > 0 {
-					recv := pkg.TypesInfo().Defs[decl.Recv.List[0].Names[0]]
-					if recv == obj {
-						// TODO(adonovan): simplify the above 7 lines to
-						// to "if obj.(*Var).Kind==Recv" in go1.25.
-						renameReceivers(pkg, recv.(*types.Var), newName, editMap)
-					}
+			if v, ok := obj.(*types.Var); ok && v.Kind() == types.RecvVar {
+				if decl, _ := cursorutil.FirstEnclosing[*ast.FuncDecl](cur); decl != nil {
+					method := pkg.TypesInfo().Defs[decl.Name].(*types.Func)
+					renameReceivers(pkg, method, newName, editMap)
 				}
 			}
 		}
@@ -772,24 +772,24 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, uri protocol.
 }
 
 // renameReceivers renames all receivers of methods of the same named
-// type as recv. The edits of each successful renaming are added to
+// type as method. The edits of each successful renaming are added to
 // editMap; the failed ones are quietly discarded.
-func renameReceivers(pkg *cache.Package, recv *types.Var, newName string, editMap map[protocol.DocumentURI][]diff.Edit) {
-	_, named := typesinternal.ReceiverNamed(recv)
+func renameReceivers(pkg *cache.Package, method *types.Func, newName string, editMap map[protocol.DocumentURI][]diff.Edit) {
+	_, named := typesinternal.RecvBase(method)
 	if named == nil {
 		return
 	}
 
 	// Find receivers of other methods of the same named type.
 	for m := range named.Origin().Methods() {
-		recv2 := m.Signature().Recv()
-		if recv2 == recv {
+		if m == method {
 			continue // don't re-rename original receiver
 		}
-		if recv2.Name() == newName {
+		recv := m.Signature().Recv()
+		if recv.Name() == newName {
 			continue // no renaming needed
 		}
-		editMap2, _, err := renameObjects(newName, pkg, recv2)
+		editMap2, _, err := renameObjects(newName, pkg, recv)
 		if err != nil {
 			continue // ignore secondary failures
 		}
@@ -1538,11 +1538,7 @@ func (r *renamer) updateCommentDocLinks() (map[protocol.DocumentURI][]diff.Edit,
 			if !isFunc {
 				continue
 			}
-			recv := obj.Signature().Recv()
-			if recv == nil {
-				continue
-			}
-			_, named := typesinternal.ReceiverNamed(recv)
+			_, named := typesinternal.RecvBase(obj)
 			if named == nil {
 				continue
 			}

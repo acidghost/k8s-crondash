@@ -40,6 +40,7 @@ import (
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
+	"golang.org/x/tools/internal/stdlib"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/versions"
@@ -56,6 +57,11 @@ type CompletionItem struct {
 	// Detail is supplemental information to present to the user.
 	// This often contains the type or return type of the completion item.
 	Detail string
+
+	// LabelDetails is the same information split into the two fields that
+	// LSP 3.17 gives defined positions. It is sent only to clients that
+	// advertise labelDetailsSupport, and is nil when there is nothing to say.
+	LabelDetails *protocol.CompletionItemLabelDetails
 
 	// InsertText is the text to insert if this item is selected.
 	// Any of the prefix that has already been typed is not trimmed.
@@ -274,8 +280,7 @@ type completer struct {
 	// [typesinternal.TooNewStdSymbols], recording for each std
 	// package which of its exported symbols are too new for
 	// the version of Go in force in the completion file.
-	// (The value is the minimum version in the form "go1.%d".)
-	tooNewSymbolsCache map[*types.Package]map[types.Object]string
+	tooNewSymbolsCache map[*types.Package]map[types.Object]stdlib.Symbol
 
 	// mapper converts the positions in the file from which the completion originated.
 	mapper *protocol.Mapper
@@ -313,7 +318,7 @@ func (c *completer) tooNew(obj types.Object) bool {
 		disallowed = typesinternal.TooNewStdSymbols(pkg, c.goversion)
 		c.tooNewSymbolsCache[pkg] = disallowed
 	}
-	return disallowed[obj] != ""
+	return disallowed[obj] != stdlib.Symbol{}
 }
 
 // funcInfo holds info about a function object.
@@ -645,7 +650,7 @@ func Completion(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, p
 		// default to a matcher that always matches
 		matcher:            prefixMatcher(""),
 		methodSetCache:     make(map[methodSetKey]*types.MethodSet),
-		tooNewSymbolsCache: make(map[*types.Package]map[types.Object]string),
+		tooNewSymbolsCache: make(map[*types.Package]map[types.Object]stdlib.Symbol),
 		mapper:             pgf.Mapper,
 		startTime:          startTime,
 		scopes:             scopes,
@@ -1219,7 +1224,7 @@ func (c *completer) populateCommentCompletions(comment *ast.CommentGroup) {
 				if recv == nil {
 					continue // may be nil if ill-typed
 				}
-				_, named := typesinternal.ReceiverNamed(recv)
+				_, named := typesinternal.RecvBase(fn)
 				if named != nil {
 					if recvStruct, ok := named.Underlying().(*types.Struct); ok {
 						for field := range recvStruct.Fields() {
@@ -1379,14 +1384,11 @@ func (c *completer) selector(ctx context.Context, sel *ast.SelectorExpr) error {
 	prefix := sel.Sel.Name
 	if c.surrounding != nil {
 		if c.surrounding.content != sel.Sel.Name {
-			// the bug reports do not include the Reportf strings just the line numbers
-			if len(c.surrounding.content) == 0 {
-				bug.Reportf("surrounding is empty, should be %q", sel.Sel.Name)
-			} else if len(sel.Sel.Name) == 0 {
-				bug.Reportf("sel.Sel.Name is empty, should be %q", c.surrounding.content)
-			} else {
+			if sel.Sel.Name != "_" && sel.Sel.Name != "" {
 				bug.Reportf("unexpected surrounding: %q != %q", c.surrounding.content, sel.Sel.Name)
+
 			}
+			prefix = c.surrounding.Prefix()
 		} else {
 			prefix = sel.Sel.Name[:c.surrounding.cursor-c.surrounding.start]
 		}
@@ -2001,14 +2003,15 @@ func enclosingFunction(path []ast.Node, info *types.Info) *funcInfo {
 			}
 		case *ast.FuncLit:
 			if typ, ok := info.Types[t]; ok {
-				if sig, _ := typ.Type.(*types.Signature); sig == nil {
+				sig, ok := typ.Type.(*types.Signature)
+				if !ok {
 					// golang/go#49397: it should not be possible, but we somehow arrived
 					// here with a non-signature type, most likely due to AST mangling
 					// such that node.Type is not a FuncType.
 					return nil
 				}
 				return &funcInfo{
-					sig:  typ.Type.(*types.Signature),
+					sig:  sig,
 					body: t.Body,
 				}
 			}
@@ -2726,7 +2729,7 @@ func (c *completer) expectedCallParamType(inf candidateInference, node *ast.Call
 		inf.objType = sig.Params().At(exprIdx).Type()
 	}
 
-	if sig.Variadic() && exprIdx >= (numParams-1) {
+	if sig.Variadic() && exprIdx >= (numParams-1) && !node.Ellipsis.IsValid() {
 		// If we are completing a variadic param, deslice the variadic type.
 		inf.objType = deslice(inf.objType)
 		// Record whether we are completing the initial variadic param.
@@ -2750,7 +2753,7 @@ func expectedConstraint(t types.Type, idx int) types.Type {
 	var tp *types.TypeParamList
 	if pnt, ok := t.(typesinternal.NamedOrAlias); ok {
 		tp = pnt.TypeParams()
-	} else if sig, _ := t.Underlying().(*types.Signature); sig != nil {
+	} else if sig, ok := t.Underlying().(*types.Signature); ok {
 		tp = sig.TypeParams()
 	}
 	if tp == nil || idx >= tp.Len() {
@@ -3574,8 +3577,8 @@ func rangeFuncParamCount(sig *types.Signature) int {
 		return -1
 	}
 
-	yieldSig, _ := sig.Params().At(0).Type().Underlying().(*types.Signature)
-	if yieldSig == nil {
+	yieldSig, ok := sig.Params().At(0).Type().Underlying().(*types.Signature)
+	if !ok {
 		return -1
 	}
 

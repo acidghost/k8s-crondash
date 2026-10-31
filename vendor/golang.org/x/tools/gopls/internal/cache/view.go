@@ -30,13 +30,13 @@ import (
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
-	"golang.org/x/tools/gopls/internal/util/moremaps"
 	"golang.org/x/tools/gopls/internal/util/pathutil"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/modindex"
+	"golang.org/x/tools/internal/moremaps"
 )
 
 // A Folder represents an LSP workspace folder, together with its per-folder
@@ -845,31 +845,34 @@ func defineView(ctx context.Context, fs file.Source, folder *Folder, forFile fil
 	def := new(viewDefinition)
 	def.folder = folder
 
-	if forFile != nil && fileKind(forFile) == file.Go {
-		// If the file has GOOS/GOARCH build constraints that
-		// don't match the folder's environment (which comes from
-		// 'go env' in the folder, plus user options),
-		// add those constraints to the viewDefinition's environment.
+	if forFile != nil {
+		kind := fileKind(forFile)
+		if zeroConfigSupported(kind) {
+			// If the file has GOOS/GOARCH build constraints that
+			// don't match the folder's environment (which comes from
+			// 'go env' in the folder, plus user options),
+			// add those constraints to the viewDefinition's environment.
 
-		// Content trimming is nontrivial, so do this outside of the loop below.
-		// Keep this in sync with [RelevantViews].
-		path := forFile.URI().Path()
-		if content, err := forFile.Content(); err == nil {
-			// Note the err == nil condition above: by convention a non-existent file
-			// does not have any constraints. See the related note in [RelevantViews]: this
-			// choice of behavior shouldn't actually matter. In this case, we should
-			// only call defineView with Overlays, which always have content.
-			content = trimContentForPortMatch(content)
-			viewPort := port{def.folder.Env.GOOS, def.folder.Env.GOARCH}
-			if !viewPort.matches(path, content) {
-				for _, p := range preferredPorts {
-					if p.matches(path, content) {
-						if def.envOverlay == nil {
-							def.envOverlay = make(map[string]string)
+			// Content trimming is nontrivial, so do this outside of the loop below.
+			// Keep this in sync with [RelevantViews].
+			path := forFile.URI().Path()
+			if content, err := forFile.Content(); err == nil {
+				// Note the err == nil condition above: by convention a non-existent file
+				// does not have any constraints. See the related note in [RelevantViews]: this
+				// choice of behavior shouldn't actually matter. In this case, we should
+				// only call defineView with Overlays, which always have content.
+				content = buildConstraintFile(kind, content)
+				viewPort := port{def.folder.Env.GOOS, def.folder.Env.GOARCH}
+				if !viewPort.matches(path, content) {
+					for _, p := range preferredPorts {
+						if p.matches(path, content) {
+							if def.envOverlay == nil {
+								def.envOverlay = make(map[string]string)
+							}
+							def.envOverlay["GOOS"] = p.GOOS
+							def.envOverlay["GOARCH"] = p.GOARCH
+							break
 						}
-						def.envOverlay["GOOS"] = p.GOOS
-						def.envOverlay["GOARCH"] = p.GOARCH
-						break
 					}
 				}
 			}
