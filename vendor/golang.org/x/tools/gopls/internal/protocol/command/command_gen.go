@@ -35,6 +35,7 @@ const (
 	ClientOpenURL           Command = "gopls.client_open_url"
 	DiagnoseFiles           Command = "gopls.diagnose_files"
 	Doc                     Command = "gopls.doc"
+	DragonSlayer            Command = "gopls.dragon_slayer"
 	EditGoDirective         Command = "gopls.edit_go_directive"
 	ExtractToNewFile        Command = "gopls.extract_to_new_file"
 	FetchVulncheckResult    Command = "gopls.fetch_vulncheck_result"
@@ -50,12 +51,14 @@ const (
 	MemStats                Command = "gopls.mem_stats"
 	ModifyTags              Command = "gopls.modify_tags"
 	Modules                 Command = "gopls.modules"
+	MoveDeclaration         Command = "gopls.move_declaration"
 	MoveType                Command = "gopls.move_type"
 	PackageSymbols          Command = "gopls.package_symbols"
 	Packages                Command = "gopls.packages"
 	RegenerateCgo           Command = "gopls.regenerate_cgo"
 	RemoveDependency        Command = "gopls.remove_dependency"
 	ResetGoModDiagnostics   Command = "gopls.reset_go_mod_diagnostics"
+	ResolveTarget           Command = "gopls.resolve_target"
 	RunGoWorkCommand        Command = "gopls.run_go_work_command"
 	RunGovulncheck          Command = "gopls.run_govulncheck"
 	RunTests                Command = "gopls.run_tests"
@@ -85,6 +88,7 @@ var Commands = []Command{
 	ClientOpenURL,
 	DiagnoseFiles,
 	Doc,
+	DragonSlayer,
 	EditGoDirective,
 	ExtractToNewFile,
 	FetchVulncheckResult,
@@ -100,12 +104,14 @@ var Commands = []Command{
 	MemStats,
 	ModifyTags,
 	Modules,
+	MoveDeclaration,
 	MoveType,
 	PackageSymbols,
 	Packages,
 	RegenerateCgo,
 	RemoveDependency,
 	ResetGoModDiagnostics,
+	ResolveTarget,
 	RunGoWorkCommand,
 	RunGovulncheck,
 	RunTests,
@@ -122,6 +128,22 @@ var Commands = []Command{
 	Vulncheck,
 	WorkspaceStats,
 }
+
+// interactiveCommands is the set of commands that may ask the user for
+// additional input before they can proceed.
+var interactiveCommands = map[Command]bool{
+	DragonSlayer:       true,
+	ImplementInterface: true,
+	ModifyTags:         true,
+	MoveDeclaration:    true,
+}
+
+// Interactive reports whether the command may ask the user for additional
+// input, through [protocol.InteractiveParams], before it can proceed.
+//
+// Such a command is resolved interactively, through "command/resolve", before
+// the client executes it; see [protocol.InteractiveParams].
+func (c Command) Interactive() bool { return interactiveCommands[c] }
 
 func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Interface) (any, error) {
 	switch Command(params.Command) {
@@ -193,6 +215,12 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 			return nil, err
 		}
 		return s.Doc(ctx, a0)
+	case DragonSlayer:
+		var a0 DragonSlayerArgs
+		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
+			return nil, err
+		}
+		return s.DragonSlayer(ctx, a0, &params.InteractiveParams)
 	case EditGoDirective:
 		var a0 EditGoDirectiveArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -241,7 +269,7 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
 			return nil, err
 		}
-		return nil, s.ImplementInterface(ctx, a0, &params.InteractiveParams)
+		return s.ImplementInterface(ctx, a0, &params.InteractiveParams)
 	case ListImports:
 		var a0 URIArg
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -269,13 +297,19 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
 			return nil, err
 		}
-		return nil, s.ModifyTags(ctx, a0, &params.InteractiveParams)
+		return s.ModifyTags(ctx, a0, &params.InteractiveParams)
 	case Modules:
 		var a0 ModulesArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
 			return nil, err
 		}
 		return s.Modules(ctx, a0)
+	case MoveDeclaration:
+		var a0 MoveDeclarationArgs
+		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
+			return nil, err
+		}
+		return s.MoveDeclaration(ctx, a0, &params.InteractiveParams)
 	case MoveType:
 		var a0 MoveTypeArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -312,6 +346,12 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 			return nil, err
 		}
 		return nil, s.ResetGoModDiagnostics(ctx, a0)
+	case ResolveTarget:
+		var a0 ResolveTargetParams
+		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
+			return nil, err
+		}
+		return s.ResolveTarget(ctx, a0)
 	case RunGoWorkCommand:
 		var a0 RunGoWorkArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -483,6 +523,14 @@ func NewDocCommand(title string, a0 DocArgs) *protocol.Command {
 	}
 }
 
+func NewDragonSlayerCommand(title string, a0 DragonSlayerArgs) *protocol.Command {
+	return &protocol.Command{
+		Title:     title,
+		Command:   DragonSlayer.String(),
+		Arguments: MustMarshalArgs(a0),
+	}
+}
+
 func NewEditGoDirectiveCommand(title string, a0 EditGoDirectiveArgs) *protocol.Command {
 	return &protocol.Command{
 		Title:     title,
@@ -603,6 +651,14 @@ func NewModulesCommand(title string, a0 ModulesArgs) *protocol.Command {
 	}
 }
 
+func NewMoveDeclarationCommand(title string, a0 MoveDeclarationArgs) *protocol.Command {
+	return &protocol.Command{
+		Title:     title,
+		Command:   MoveDeclaration.String(),
+		Arguments: MustMarshalArgs(a0),
+	}
+}
+
 func NewMoveTypeCommand(title string, a0 MoveTypeArgs) *protocol.Command {
 	return &protocol.Command{
 		Title:     title,
@@ -647,6 +703,14 @@ func NewResetGoModDiagnosticsCommand(title string, a0 ResetGoModDiagnosticsArgs)
 	return &protocol.Command{
 		Title:     title,
 		Command:   ResetGoModDiagnostics.String(),
+		Arguments: MustMarshalArgs(a0),
+	}
+}
+
+func NewResolveTargetCommand(title string, a0 ResolveTargetParams) *protocol.Command {
+	return &protocol.Command{
+		Title:     title,
+		Command:   ResolveTarget.String(),
 		Arguments: MustMarshalArgs(a0),
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol/command"
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/cursorutil"
+	"golang.org/x/tools/internal/analysis/intconv"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
@@ -208,12 +209,10 @@ func (req *codeActionsRequest) resolveEdits() bool {
 
 // lazyInit[*T](ctx, req) returns a pointer to an instance of T,
 // calling new(T).init(ctx.req) on the first request.
-//
-// It is conceptually a (generic) method of req.
-func lazyInit[P interface {
+func (req *codeActionsRequest) lazyInit[P interface {
 	init(ctx context.Context, req *codeActionsRequest)
 	*T
-}, T any](ctx context.Context, req *codeActionsRequest) P {
+}, T any](ctx context.Context) P {
 	t := reflect.TypeFor[T]()
 	v, ok := req.lazy[t].(P)
 	if !ok {
@@ -257,6 +256,7 @@ var codeActionProducers = [...]codeActionProducer{
 	{kind: settings.RefactorInlineCall, fn: refactorInlineCall, needPkg: true},
 	{kind: settings.RefactorInlineVariable, fn: refactorInlineVariable, needPkg: true},
 	{kind: settings.RefactorMoveType, fn: refactorMoveType, needPkg: true},
+	{kind: settings.RefactorMoveDeclaration, fn: refactorMoveDeclaration, needPkg: true},
 	{kind: settings.RefactorRewriteChangeQuote, fn: refactorRewriteChangeQuote},
 	{kind: settings.RefactorRewriteFillStruct, fn: refactorRewriteFillStruct, needPkg: true},
 	{kind: settings.RefactorRewriteFillSwitch, fn: refactorRewriteFillSwitch, needPkg: true},
@@ -270,6 +270,7 @@ var codeActionProducers = [...]codeActionProducer{
 	{kind: settings.RefactorRewriteEliminateDotImport, fn: refactorRewriteEliminateDotImport, needPkg: true},
 	{kind: settings.RefactorRewriteAddTags, fn: refactorRewriteAddStructTags, needPkg: true},
 	{kind: settings.RefactorRewriteRemoveTags, fn: refactorRewriteRemoveStructTags, needPkg: true},
+	{kind: settings.GoplsDragonSlayer, fn: goplsDragonSlayer},
 	{kind: settings.GoplsDocFeatures, fn: goplsDocFeatures}, // offer this one last (#72742)
 
 	// Note: don't forget to update the allow-list in Server.CodeAction
@@ -279,7 +280,7 @@ var codeActionProducers = [...]codeActionProducer{
 
 // sourceOrganizeImports produces "Organize Imports" code actions.
 func sourceOrganizeImports(ctx context.Context, req *codeActionsRequest) error {
-	res := lazyInit[*allImportsFixesResult](ctx, req)
+	res := req.lazyInit[*allImportsFixesResult](ctx)
 
 	// Send all of the import edits as one code action
 	// if the file is being organized.
@@ -300,19 +301,14 @@ func quickFix(ctx context.Context, req *codeActionsRequest) error {
 	}
 
 	// Process any missing imports and pair them with the diagnostics they fix.
-	res := lazyInit[*allImportsFixesResult](ctx, req)
-	if res.err != nil {
-		return nil
-	}
-
-	// Separate this into a set of codeActions per diagnostic, where
-	// each action is the addition, removal, or renaming of one import.
-	for _, importFix := range res.editsPerFix {
-		fixedDiags := fixedByImportFix(importFix.fix, req.diagnostics)
-		if len(fixedDiags) == 0 {
-			continue
+	if res := req.lazyInit[*allImportsFixesResult](ctx); res.err == nil {
+		// Separate this into a set of codeActions per diagnostic, where
+		// each action is the addition, removal, or renaming of one import.
+		for _, importFix := range res.editsPerFix {
+			if fixedDiags := fixedByImportFix(importFix.fix, req.diagnostics); len(fixedDiags) > 0 {
+				req.addEditAction(importFixTitle(importFix.fix), fixedDiags, protocol.DocumentChangeEdit(req.fh, importFix.edits))
+			}
 		}
-		req.addEditAction(importFixTitle(importFix.fix), fixedDiags, protocol.DocumentChangeEdit(req.fh, importFix.edits))
 	}
 
 	// Quick fixes for type errors.
@@ -330,6 +326,36 @@ func quickFix(ctx context.Context, req *codeActionsRequest) error {
 
 		msg := typeError.Msg
 		switch {
+		// "cannot convert x (variable of type int) to type string:
+		// argument must have type byte or rune with go1.28 or later"
+		// Offer the same fixes as the stringintconv analyzer.
+		// (This case must precede the more general "cannot convert".)
+		case strings.Contains(msg, "argument must have type byte or rune"):
+			if cur, ok := req.pgf.Cursor().FindByPos(start, end); ok {
+				// The error is reported at the operand x; find enclosing conversion.
+				for curCall := range cur.Enclosing((*ast.CallExpr)(nil)) {
+					if diag, ok := intconv.Check(info, curCall); ok {
+						for _, fix := range diag.SuggestedFixes {
+							// The action indicates which diagnostics it will fix; filter them.
+							var fixedDiags []protocol.Diagnostic
+							for _, diag := range req.diagnostics {
+								if cache.DiagnosticSource(diag.Source) == cache.TypeError &&
+									strings.Contains(diag.MessageString(), msg) &&
+									protocol.Intersect(diag.Range, typeErrorRange) {
+									fixedDiags = append(fixedDiags, diag)
+								}
+							}
+							edits, err := req.pgf.ProtocolTextEdits(fix.TextEdits)
+							if err != nil {
+								continue
+							}
+							req.addEditAction(fix.Message, fixedDiags, protocol.DocumentChangeEdit(req.fh, edits))
+						}
+						break
+					}
+				}
+			}
+
 		// "Missing method" error? (stubmethods)
 		// Offer a "Declare missing methods of INTERFACE" code action.
 		// See [stubMissingInterfaceMethodsFixer] for command implementation.
@@ -403,30 +429,30 @@ func importFixTitle(fix *imports.ImportFix) string {
 func fixedByImportFix(fix *imports.ImportFix, diagnostics []protocol.Diagnostic) []protocol.Diagnostic {
 	var results []protocol.Diagnostic
 	for _, diagnostic := range diagnostics {
+		msg := diagnostic.MessageString()
 		switch {
 		// "undeclared name: X" may be an unresolved import.
-		case strings.HasPrefix(diagnostic.Message, "undeclared name: "):
-			ident := strings.TrimPrefix(diagnostic.Message, "undeclared name: ")
+		case strings.HasPrefix(msg, "undeclared name: "):
+			ident := strings.TrimPrefix(msg, "undeclared name: ")
 			if ident == fix.IdentName {
 				results = append(results, diagnostic)
 			}
 		// "undefined: X" may be an unresolved import at Go 1.20+.
-		case strings.HasPrefix(diagnostic.Message, "undefined: "):
-			ident := strings.TrimPrefix(diagnostic.Message, "undefined: ")
+		case strings.HasPrefix(msg, "undefined: "):
+			ident := strings.TrimPrefix(msg, "undefined: ")
 			if ident == fix.IdentName {
 				results = append(results, diagnostic)
 			}
 		// "could not import: X" may be an invalid import.
-		case strings.HasPrefix(diagnostic.Message, "could not import: "):
-			ident := strings.TrimPrefix(diagnostic.Message, "could not import: ")
+		case strings.HasPrefix(msg, "could not import: "):
+			ident := strings.TrimPrefix(msg, "could not import: ")
 			if ident == fix.IdentName {
 				results = append(results, diagnostic)
 			}
 		// "X imported but not used" is an unused import.
 		// "X imported but not used as Y" is an unused import.
-		case strings.Contains(diagnostic.Message, " imported but not used"):
-			idx := strings.Index(diagnostic.Message, " imported but not used")
-			importPath := diagnostic.Message[:idx]
+		case strings.Contains(msg, " imported but not used"):
+			importPath, _, _ := strings.Cut(msg, " imported but not used")
 			if importPath == fmt.Sprintf("%q", fix.StmtInfo.ImportPath) {
 				results = append(results, diagnostic)
 			}
@@ -700,7 +726,7 @@ func refactorRewriteInvertIf(ctx context.Context, req *codeActionsRequest) error
 // See [splitLines] for command implementation.
 func refactorRewriteSplitLines(ctx context.Context, req *codeActionsRequest) error {
 	// TODO(adonovan): opt: don't set needPkg just for FileSet.
-	if msg, ok, _ := canSplitLines(req.pgf.Cursor(), req.pkg.FileSet(), req.start, req.end); ok {
+	if msg, ok, _ := canSplitLines(req.pgf.Cursor(), req.pkg.FileSet(), req.pgf.Src, req.start, req.end); ok {
 		req.addApplyFixAction(msg, fixSplitLines, req.loc)
 	}
 	return nil
@@ -806,7 +832,7 @@ func refactorRewriteEliminateDotImport(ctx context.Context, req *codeActionsRequ
 // See [joinLines] for command implementation.
 func refactorRewriteJoinLines(ctx context.Context, req *codeActionsRequest) error {
 	// TODO(adonovan): opt: don't set needPkg just for FileSet.
-	if msg, ok, _ := canJoinLines(req.pgf.Cursor(), req.pkg.FileSet(), req.start, req.end); ok {
+	if msg, ok, _ := canJoinLines(req.pgf.Cursor(), req.pkg.FileSet(), req.pgf.Src, req.start, req.end); ok {
 		req.addApplyFixAction(msg, fixJoinLines, req.loc)
 	}
 	return nil
@@ -890,63 +916,12 @@ func selectionContainsStruct(cursor inspector.Cursor, start, end token.Pos, remo
 	return false
 }
 
-// supportsDialog reports whether the client supports interactive UI dialogs.
-//
-// If more than one form is provided, they are treated as a prioritized list of
-// alternatives, typically ordered with decreasing demands for client protocol
-// support. The function returns true if the client explicitly supports all
-// field input types required by at least one of these alternative forms.
-//
-// If no forms are provided, the function panics.
-func supportsDialog(options settings.ClientOptions, forms ...[]protocol.FormField) bool {
-	if len(forms) == 0 {
-		panic("supportsDialog called with empty forms")
-	}
-
-	// Ensure that at least one form does not depend on unsupported types.
-	for _, form := range forms {
-		if !slices.ContainsFunc(form, func(field protocol.FormField) bool {
-			return !options.SupportedInteractiveInputTypes[formFieldInputType(field.Type)]
-		}) {
-			return true // form is free of unsupported types
-		}
-	}
-
-	return false
-}
-
-// formFieldInputType extracts the interactive input type from a
-// protocol.FormFieldType*.
-//
-// It panics if the type is unknown, as forms are generated internally by gopls.
-func formFieldInputType(typ any) settings.InteractiveInputType {
-	switch t := typ.(type) {
-	case protocol.FormFieldTypeString:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeFile:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeBool:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeNumber:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeEnum:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeLazyEnum:
-		return settings.InteractiveInputType(t.Kind)
-	case protocol.FormFieldTypeList:
-		return settings.InteractiveInputType(t.Kind)
-	default:
-		// A form field type was added to gopls without updating this function.
-		panic(fmt.Sprintf("gopls bug: unhandled FormFieldType %T", typ))
-	}
-}
-
 // refactorRewriteAddStructTags produces "Add struct tags" code actions.
 // See [server.commandHandler.ModifyTags] for command implementation.
 func refactorRewriteAddStructTags(ctx context.Context, req *codeActionsRequest) error {
 	if selectionContainsStruct(req.pgf.Cursor(), req.start, req.end, false) {
 		add := ""
-		if !supportsDialog(req.snapshot.Options().ClientOptions, addTagsForm) {
+		if !supportsDialog(req.snapshot.Options().ClientOptions, addTagsQuestions) {
 			add = "json" // default choice
 		}
 		cmdAdd := command.NewModifyTagsCommand("Add struct tags", command.ModifyTagsArgs{
@@ -964,7 +939,7 @@ func refactorRewriteAddStructTags(ctx context.Context, req *codeActionsRequest) 
 // See [server.commandHandler.ModifyTags] for command implementation.
 func refactorRewriteRemoveStructTags(ctx context.Context, req *codeActionsRequest) error {
 	if selectionContainsStruct(req.pgf.Cursor(), req.start, req.end, true) {
-		clear := !supportsDialog(req.snapshot.Options().ClientOptions, removeTagsForm) // clear the entry if there is no dialog
+		clear := !supportsDialog(req.snapshot.Options().ClientOptions, removeTagsQuestions) // clear the entry if there is no dialog
 		cmdRemove := command.NewModifyTagsCommand("Remove struct tags", command.ModifyTagsArgs{
 			Modification: "remove",
 			URI:          req.loc.URI,
@@ -983,7 +958,7 @@ func refactorRewriteImplementInterface(_ context.Context, req *codeActionsReques
 	// The "Implement Interface" interaction requires either lazy enum support
 	// (for rich workspace symbol search) or at least string support (as a fallback
 	// text prompt). We disable the action if the client supports neither.
-	if !supportsDialog(req.snapshot.Options().ClientOptions, implementInterfaceFormLazyEnum, implementInterfaceFormString) {
+	if !supportsDialog(req.snapshot.Options().ClientOptions, implementInterfaceQuestions) {
 		return nil
 	}
 
@@ -1187,7 +1162,7 @@ func goAssembly(ctx context.Context, req *codeActionsRequest) error {
 
 				if sig := fn.Signature(); sig.TypeParams() == nil && sig.RecvTypeParams() == nil { // generic => no assembly
 					if sig.Recv() != nil {
-						if isPtr, named := typesinternal.ReceiverNamed(sig.Recv()); named != nil {
+						if isPtr, named := typesinternal.RecvBase(fn); named != nil {
 							if isPtr {
 								fmt.Fprintf(&sym, "(*%s)", named.Obj().Name())
 							} else {
@@ -1254,6 +1229,21 @@ func refactorMoveType(_ context.Context, req *codeActionsRequest) error {
 	if specCur, ok := selectionContainsTypeSpec(curSel); ok {
 		spec := specCur.Node().(*ast.TypeSpec)
 		cmd := command.NewMoveTypeCommand(fmt.Sprintf("Move type %s", spec.Name.Name), command.MoveTypeArgs{Location: req.loc})
+		req.addCommandAction(cmd, false)
+	}
+	return nil
+}
+
+func refactorMoveDeclaration(_ context.Context, req *codeActionsRequest) error {
+	if !req.snapshot.Options().MoveDeclaration {
+		return nil
+	}
+	if !supportsDialog(req.snapshot.Options().ClientOptions, moveDeclarationQuestions) {
+		return nil
+	}
+	curSel, _ := req.pgf.Cursor().FindByPos(req.start, req.end)
+	if cur, name, _ := moveDeclTarget(req.pkg.TypesInfo(), curSel); cur.Valid() {
+		cmd := command.NewMoveDeclarationCommand(fmt.Sprintf("Move declaration %s", name), command.MoveDeclarationArgs{Location: req.loc})
 		req.addCommandAction(cmd, false)
 	}
 	return nil

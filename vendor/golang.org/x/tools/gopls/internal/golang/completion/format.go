@@ -28,6 +28,34 @@ var (
 	errLowScore = errors.New("not a high scoring candidate")
 )
 
+// labelDetails builds the LSP label details for a candidate. detail is the
+// type of the candidate, and description its import path, empty unless
+// accepting the candidate adds an import.
+//
+// The detail is rendered immediately after the label with no spacing, so a
+// function drops its "func" prefix and everything else gains a leading space.
+func labelDetails(kind protocol.CompletionItemKind, detail, description string) *protocol.CompletionItemLabelDetails {
+	switch kind {
+	case protocol.FunctionCompletion, protocol.MethodCompletion:
+		detail = strings.TrimPrefix(detail, "func")
+	case protocol.ModuleCompletion:
+		// The detail of a package is its quoted import path, which the
+		// description already reports.
+		detail = ""
+	default:
+		if detail != "" {
+			detail = " " + detail
+		}
+	}
+	if detail == "" && description == "" {
+		return nil
+	}
+	return &protocol.CompletionItemLabelDetails{
+		Detail:      detail,
+		Description: description,
+	}
+}
+
 // item formats a candidate to a CompletionItem.
 func (c *completer) item(ctx context.Context, cand candidate) (CompletionItem, error) {
 	obj := cand.obj
@@ -52,6 +80,7 @@ func (c *completer) item(ctx context.Context, cand candidate) (CompletionItem, e
 	var (
 		label         = cand.name
 		detail        = types.TypeString(obj.Type(), c.qual)
+		description   string // import path, if accepting the item adds an import
 		insert        = label
 		kind          = protocol.TextCompletion
 		snip          snippet.Builder
@@ -180,6 +209,10 @@ Suffixes:
 		}
 	}
 
+	// The label details hold the import path separately, so they use the
+	// detail from before the "(from ...)" text is appended to it.
+	labelDetail := detail
+
 	// If this candidate needs an additional import statement,
 	// add the additional text edits needed.
 	if cand.imp != nil {
@@ -190,6 +223,7 @@ Suffixes:
 		}
 
 		protocolEdits = append(protocolEdits, addlEdits...)
+		description = cand.imp.importPath
 		if kind != protocol.ModuleCompletion {
 			if detail != "" {
 				detail += " "
@@ -198,10 +232,15 @@ Suffixes:
 		}
 	}
 
+	// replacing suffix with conv.suffix was wrong (Issue 80268)
+	// That produced `(*[10]int)(array)` for passing an
+	// array to a function expecting an array pointer. But
+	// `(*[10]int)(array[:])` is what is wanted.
+	// (conv.suffix is always ")" or empty)
 	if cand.convertTo != nil {
 		conv := c.formatConversion(cand.convertTo)
 		prefix = conv.prefix + prefix
-		suffix = conv.suffix
+		suffix = suffix + conv.suffix
 	}
 
 	if prefix != "" {
@@ -225,9 +264,11 @@ Suffixes:
 	}
 
 	detail = strings.TrimPrefix(detail, "untyped ")
+	labelDetail = strings.TrimPrefix(labelDetail, "untyped ")
 	// override computed detail with provided detail, if something is provided.
 	if cand.detail != "" {
 		detail = cand.detail
+		labelDetail = cand.detail
 	}
 
 	// When completing right after "//" (cursor at the slashes with no space),
@@ -242,6 +283,7 @@ Suffixes:
 		InsertText:          insert,
 		AdditionalTextEdits: protocolEdits,
 		Detail:              detail,
+		LabelDetails:        labelDetails(kind, labelDetail, description),
 		Kind:                kind,
 		Score:               cand.score,
 		Depth:               len(cand.path),
