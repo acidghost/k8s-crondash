@@ -140,6 +140,13 @@ func parameterNames(info *types.Info, pgf *parsego.File, qual types.Qualifier, c
 }
 
 func ignoredError(info *types.Info, pgf *parsego.File, qual types.Qualifier, cur inspector.Cursor, add func(protocol.InlayHint)) {
+	ignoreSubstrings := []string{
+		"ignore error",
+		"discard error",
+		"can't fail",
+		"cannot fail",
+	}
+
 outer:
 	for curCall := range cur.Preorder((*ast.ExprStmt)(nil)) {
 		stmt := curCall.Node().(*ast.ExprStmt)
@@ -171,7 +178,7 @@ outer:
 			continue
 		}
 
-		// Suppress if comment on same line contains "// ignore error".
+		// Suppress if comment on same line contains "ignore error" (etc).
 		line := func(pos token.Pos) int { return safetoken.Line(pgf.Tok, pos) }
 		comments := pgf.File.Comments
 		compare := func(cg *ast.CommentGroup, pos token.Pos) int {
@@ -180,8 +187,12 @@ outer:
 		i, _ := slices.BinarySearchFunc(comments, stmt.End(), compare)
 		if i >= 0 && i < len(comments) {
 			cg := comments[i]
-			if line(cg.Pos()) == line(stmt.End()) && strings.Contains(cg.Text(), "ignore error") {
-				continue outer // suppress
+			if line(cg.Pos()) == line(stmt.End()) {
+				for _, sub := range ignoreSubstrings {
+					if strings.Contains(cg.Text(), sub) {
+						continue outer // suppress
+					}
+				}
 			}
 		}
 
@@ -198,14 +209,37 @@ outer:
 }
 
 func funcTypeParams(info *types.Info, pgf *parsego.File, qual types.Qualifier, cur inspector.Cursor, add func(protocol.InlayHint)) {
+	unwrapIdent := func(expr ast.Expr) *ast.Ident {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return e
+		case *ast.SelectorExpr:
+			return e.Sel
+		}
+		return nil
+	}
+
 	for curCall := range cur.Preorder((*ast.CallExpr)(nil)) {
 		call := curCall.Node().(*ast.CallExpr)
-		var id *ast.Ident
+		var (
+			id            *ast.Ident
+			startInlayPos token.Pos
+			explicitArgs  int
+		)
 		switch fun := call.Fun.(type) {
-		case *ast.Ident:
-			id = fun
-		case *ast.SelectorExpr: // imported function
-			id = fun.Sel
+		case *ast.Ident, *ast.SelectorExpr:
+			id = unwrapIdent(fun)
+			startInlayPos = id.End()
+		case *ast.IndexExpr:
+			id = unwrapIdent(fun.X)
+			startInlayPos = fun.Index.End()
+			explicitArgs = 1
+		case *ast.IndexListExpr:
+			id = unwrapIdent(fun.X)
+			if len(fun.Indices) > 0 {
+				startInlayPos = fun.Indices[len(fun.Indices)-1].End()
+			}
+			explicitArgs = len(fun.Indices)
 		}
 		if id == nil {
 			continue
@@ -214,20 +248,26 @@ func funcTypeParams(info *types.Info, pgf *parsego.File, qual types.Qualifier, c
 		if inst.TypeArgs == nil {
 			continue
 		}
-		start, err := pgf.PosPosition(id.End())
-		if err != nil {
-			continue
-		}
 		var args []string
-		for t := range inst.TypeArgs.Types() {
-			args = append(args, types.TypeString(t, qual))
+		for i := explicitArgs; i < inst.TypeArgs.Len(); i++ {
+			args = append(args, types.TypeString(inst.TypeArgs.At(i), qual))
 		}
 		if len(args) == 0 {
 			continue
 		}
+		start, err := pgf.PosPosition(startInlayPos)
+		if err != nil {
+			continue
+		}
+		var label string
+		if explicitArgs == 0 {
+			label = "[" + strings.Join(args, ", ") + "]"
+		} else {
+			label = ", " + strings.Join(args, ", ")
+		}
 		add(protocol.InlayHint{
 			Position: start,
-			Label:    labelPart("[" + strings.Join(args, ", ") + "]"),
+			Label:    labelPart(label),
 			Kind:     protocol.Type,
 		})
 	}
@@ -360,7 +400,7 @@ func compositeLiteralFields(info *types.Info, pgf *parsego.File, qual types.Qual
 					}
 
 					if seln, ok := types.LookupSelection(strct, true, pkg, id.Name); ok {
-						for field := range typesinternal.ImplicitFieldSelections(seln) {
+						for field := range typesinternal.ImplicitFieldSelections(&seln) {
 							label.WriteString(field.Name())
 							label.WriteByte('.')
 						}

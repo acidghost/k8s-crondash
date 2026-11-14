@@ -106,8 +106,7 @@ func frobFor(t reflect.Type) *frob {
 			fr.addElem(fr.t.Elem())
 
 		case reflect.Struct:
-			for i := 0; i < fr.t.NumField(); i++ {
-				field := fr.t.Field(i)
+			for field := range fr.t.Fields() {
 				if field.PkgPath != "" {
 					continue // skip unexported field
 				}
@@ -212,10 +211,15 @@ func (fr *frob) encode(out *writer, v reflect.Value) {
 		len := v.Len()
 		out.uint32(uint32(len))
 		if len > 0 {
+			n := 0
 			kfrob, vfrob := fr.elems[0], fr.elems[1]
-			for iter := v.MapRange(); iter.Next(); {
+			for iter := v.MapRange(); iter.Next(); n++ {
 				kfrob.encode(out, iter.Key())
 				vfrob.encode(out, iter.Value())
+			}
+			if n != len {
+				// Better to be defensive than emit a malformed record.
+				panic("concurrent map modification")
 			}
 		}
 
