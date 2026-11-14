@@ -46,7 +46,7 @@ github.com/a-h/templ/safehtml
 # github.com/alecthomas/kong v1.16.1
 ## explicit; go 1.20
 github.com/alecthomas/kong
-# github.com/andybalholm/brotli v1.2.6
+# github.com/andybalholm/brotli v1.2.7
 ## explicit; go 1.22
 github.com/andybalholm/brotli
 github.com/andybalholm/brotli/matchfinder
