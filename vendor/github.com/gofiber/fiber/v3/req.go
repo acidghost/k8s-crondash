@@ -3,6 +3,7 @@ package fiber
 import (
 	"bytes"
 	"errors"
+	"io"
 	"math"
 	"mime/multipart"
 	"net"
@@ -15,6 +16,9 @@ import (
 	"github.com/valyala/fasthttp"
 	"golang.org/x/net/idna"
 
+	etagpkg "github.com/gofiber/fiber/v3/internal/etag"
+	"github.com/gofiber/fiber/v3/internal/fieldname"
+	"github.com/gofiber/fiber/v3/internal/headerlist"
 	"github.com/gofiber/fiber/v3/internal/mediatype"
 )
 
@@ -49,33 +53,44 @@ type DefaultReq struct {
 
 // Accepts checks if the specified extensions or content types are acceptable.
 func (r *DefaultReq) Accepts(offers ...string) string {
-	header := joinHeaderValues(r.c.fasthttp.Request.Header.PeekAll(HeaderAccept))
+	header := peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAccept)
 	return getOffer(header, acceptsOfferType, offers...)
 }
 
 // AcceptsCharsets checks if the specified charset is acceptable.
 func (r *DefaultReq) AcceptsCharsets(offers ...string) string {
-	header := joinHeaderValues(r.c.fasthttp.Request.Header.PeekAll(HeaderAcceptCharset))
+	header := peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptCharset)
 	return getOffer(header, acceptsOffer, offers...)
 }
 
 // AcceptsEncodings checks if the specified encoding is acceptable.
+//
+// Per RFC 9110 §12.5.3, a missing Accept-Encoding accepts any coding (the first
+// offer wins), an empty one only "identity", and "identity" is acceptable unless
+// the field excludes it with q=0.
 func (r *DefaultReq) AcceptsEncodings(offers ...string) string {
-	header := joinHeaderValues(r.c.fasthttp.Request.Header.PeekAll(HeaderAcceptEncoding))
-	return getOffer(header, acceptsOffer, offers...)
+	header, present := lookupJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptEncoding)
+	if len(header) == 0 && len(offers) > 0 {
+		// Nothing to weigh, but an absent field and a present, empty one differ.
+		if !present {
+			return offers[0]
+		}
+		return identityOffer(offers)
+	}
+	return getEncodingOffer(header, offers)
 }
 
 // AcceptsLanguages checks if the specified language is acceptable using
 // RFC 4647 Basic Filtering.
 func (r *DefaultReq) AcceptsLanguages(offers ...string) string {
-	header := joinHeaderValues(r.c.fasthttp.Request.Header.PeekAll(HeaderAcceptLanguage))
+	header := peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptLanguage)
 	return getOffer(header, acceptsLanguageOfferBasic, offers...)
 }
 
 // AcceptsLanguagesExtended checks if the specified language is acceptable using
 // RFC 4647 Extended Filtering.
 func (r *DefaultReq) AcceptsLanguagesExtended(offers ...string) string {
-	header := joinHeaderValues(r.c.fasthttp.Request.Header.PeekAll(HeaderAcceptLanguage))
+	header := peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptLanguage)
 	return getOffer(header, acceptsLanguageOfferExtended, offers...)
 }
 
@@ -84,7 +99,7 @@ func (r *DefaultReq) App() *App {
 	return r.c.app
 }
 
-// BaseURL returns (protocol + host + base path).
+// BaseURL returns (protocol + host), such as "https://example.com". It carries no path.
 func (r *DefaultReq) BaseURL() string {
 	return r.c.BaseURL()
 }
@@ -135,7 +150,11 @@ func (r *DefaultReq) tryDecodeBodyInOrder(
 				*originalBody = make([]byte, len(tempBody))
 				copy(*originalBody, tempBody)
 			}
-			request.SetBodyRaw(body)
+			// identity leaves the body as it is; re-setting an aliasing slice would
+			// release its buffer under ReduceMemoryUsage.
+			if encoding != StrIdentity {
+				request.SetBodyRaw(body)
+			}
 		}
 	}
 
@@ -157,11 +176,13 @@ func (r *DefaultReq) Body() []byte {
 
 	request := &r.c.fasthttp.Request
 
-	// Fast path: no Content-Encoding header at all. ContentEncoding uses the
-	// pre-normalized key constant, so absence costs a single cheap lookup.
+	// Fast path: no Content-Encoding header at all. ContentEncoding peeks the
+	// stored key byte-exactly, which is decisive only while fasthttp normalized
+	// the names on the way in — under DisableHeaderNormalizing a lower-case
+	// spelling would read as absent here and skip decompression entirely.
 	// An empty value is still a present field line and must be joined with
 	// duplicates below before RFC 9110 empty-list elements are ignored.
-	if request.Header.ContentEncoding() == nil {
+	if !r.c.app.config.DisableHeaderNormalizing && request.Header.ContentEncoding() == nil {
 		return r.getBody()
 	}
 
@@ -175,7 +196,7 @@ func (r *DefaultReq) Body() []byte {
 	// rule defined at: https://www.rfc-editor.org/rfc/rfc9110#section-8.4-5
 	// The splitter drops empty list elements (RFC 9110 Section 5.6.1.2), and
 	// headerEncoding was already lowercased wholesale above.
-	encodingOrder = getSplicedStrList(headerEncoding, encodingOrder)
+	encodingOrder = headerlist.Append(encodingOrder, headerEncoding)
 	if len(encodingOrder) == 0 {
 		return r.getBody()
 	}
@@ -204,6 +225,20 @@ func (r *DefaultReq) Body() []byte {
 	return r.c.app.GetBytes(body)
 }
 
+// BodyStream returns the request body as a stream, non-nil only when
+// Config.StreamRequestBody is enabled and the body is not already buffered.
+// Reading it consumes the body, so a later Body call will not see it.
+func (r *DefaultReq) BodyStream() io.Reader {
+	return r.c.fasthttp.Request.BodyStream()
+}
+
+// ContentLength returns the value of the Content-Length request header. A
+// negative result is not a length: -1 is chunked and -2 is identity, which is
+// what a bodyless GET reports. Use HasBody to test for a body at all.
+func (r *DefaultReq) ContentLength() int {
+	return r.c.fasthttp.Request.Header.ContentLength()
+}
+
 // RequestCtx returns *fasthttp.RequestCtx that carries a deadline
 // a cancellation signal, and other values across API boundaries.
 func (r *DefaultReq) RequestCtx() *fasthttp.RequestCtx {
@@ -211,116 +246,108 @@ func (r *DefaultReq) RequestCtx() *fasthttp.RequestCtx {
 }
 
 // FullURL returns the full request URL (protocol + host + original URL).
-func (c *DefaultCtx) FullURL() string {
+func (r *DefaultReq) FullURL() string {
 	buf := bytebufferpool.Get()
 	defer bytebufferpool.Put(buf)
 
-	buf.WriteString(c.Scheme())
+	buf.WriteString(r.Scheme())
 	buf.WriteString("://")
-	buf.WriteString(c.Host())
-	buf.WriteString(c.OriginalURL())
+	buf.WriteString(r.Host())
+	buf.WriteString(r.OriginalURL())
 
 	return buf.String()
 }
 
 // UserAgent returns the User-Agent request header.
-func (c *DefaultCtx) UserAgent() string {
-	return c.app.toString(c.fasthttp.Request.Header.UserAgent())
+func (r *DefaultReq) UserAgent() string {
+	return r.c.app.toString(r.c.fasthttp.Request.Header.UserAgent())
 }
 
 // Referer returns the Referer request header.
-func (c *DefaultCtx) Referer() string {
-	return c.app.toString(c.fasthttp.Request.Header.Referer())
+func (r *DefaultReq) Referer() string {
+	return r.c.app.toString(r.c.fasthttp.Request.Header.Referer())
+}
+
+// Origin returns the Origin request header.
+// Returned value is only valid within the handler. Do not store any references.
+// Make copies or use the Immutable setting to use the value outside the Handler.
+func (r *DefaultReq) Origin() string {
+	return r.c.app.toString(r.headerField(HeaderOrigin))
+}
+
+// headerField returns a request header's first non-empty field value, matching
+// the field name case-insensitively (RFC 9110 Section 5.1). fieldname.First
+// also steps over a present-but-empty first line, so a value on a later line
+// is found and this agrees with GetAll on whether the field is there.
+func (r *DefaultReq) headerField(name string) []byte {
+	return fieldname.First(&r.c.fasthttp.Request.Header, name, !r.c.app.config.DisableHeaderNormalizing)
 }
 
 // AcceptLanguage returns the Accept-Language request header.
-// Repeated field lines are combined into one comma-joined list
-// (RFC 9110 Section 5.2), matching what AcceptsLanguages negotiates on.
-func (c *DefaultCtx) AcceptLanguage() string {
-	return c.app.toString(joinHeaderValues(c.fasthttp.Request.Header.PeekAll(HeaderAcceptLanguage)))
+// Repeated field lines are combined into one comma-joined list (RFC 9110
+// Section 5.2) and the field name matches case-insensitively (Section 5.1),
+// matching what AcceptsLanguages negotiates on.
+func (r *DefaultReq) AcceptLanguage() string {
+	return r.c.app.toString(peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptLanguage))
 }
 
 // AcceptEncoding returns the Accept-Encoding request header.
-// Repeated field lines are combined into one comma-joined list
-// (RFC 9110 Section 5.2), matching what AcceptsEncodings negotiates on.
-func (c *DefaultCtx) AcceptEncoding() string {
-	return c.app.toString(joinHeaderValues(c.fasthttp.Request.Header.PeekAll(HeaderAcceptEncoding)))
+// Repeated field lines are combined into one comma-joined list (RFC 9110
+// Section 5.2) and the field name matches case-insensitively (Section 5.1),
+// matching what AcceptsEncodings negotiates on.
+func (r *DefaultReq) AcceptEncoding() string {
+	return r.c.app.toString(peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderAcceptEncoding))
 }
 
 // HasHeader reports whether the request includes a header with the given key.
-func (c *DefaultCtx) HasHeader(key string) bool {
-	return len(c.fasthttp.Request.Header.Peek(key)) > 0
+// The field name matches case-insensitively (RFC 9110 Section 5.1), so this
+// agrees with GetAll on whether the field is there.
+func (r *DefaultReq) HasHeader(key string) bool {
+	return len(r.headerField(key)) > 0
+}
+
+// HasHeaderValue reports whether the request header key lists value as one of
+// its comma-separated members, on any of its field lines. Repeated field lines
+// are one list (RFC 9110 Section 5.3) and the member matches under ASCII case
+// folding, so it fits directive-style headers such as Cache-Control or
+// Connection. A comma inside a quoted argument does not end a member, so
+// `ext="a,no-transform,b"` is one member and does not list no-transform
+// (RFC 9111 permits quoted directive arguments, escaped quotes included). An
+// empty value is never present. Only valid within the handler.
+func (r *DefaultReq) HasHeaderValue(key, value string) bool {
+	// One lookup settles the common case of a header that is not there at all.
+	if value == "" || len(r.headerField(key)) == 0 {
+		return false
+	}
+	app := r.c.app
+	for _, line := range fieldname.Lines(&r.c.fasthttp.Request.Header, key, !app.config.DisableHeaderNormalizing) {
+		for member := range headerlist.AllQuotedPairs(app.toString(line)) {
+			if utils.EqualFold(member, value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ContentType returns the Content-Type request header, parameters included;
+// MediaType strips them and Charset returns just the charset. On Ctx the request
+// wins over Res. Only valid within the handler unless Immutable is set.
+func (r *DefaultReq) ContentType() string {
+	return r.c.app.toString(r.c.fasthttp.Request.Header.ContentType())
 }
 
 // MediaType returns the MIME type from the Content-Type header without parameters.
-func (c *DefaultCtx) MediaType() string {
-	contentType := utils.TrimSpace(c.fasthttp.Request.Header.ContentType())
-	if len(contentType) == 0 {
-		return ""
-	}
-	if idx := bytes.IndexByte(contentType, ';'); idx != -1 {
-		contentType = contentType[:idx]
-	}
-	contentType = utils.TrimSpace(contentType)
-	return c.app.toString(contentType)
+func (r *DefaultReq) MediaType() string {
+	return r.c.app.toString(mediatype.StripParams(r.c.fasthttp.Request.Header.ContentType()))
 }
 
 // Charset returns the charset parameter from the Content-Type header.
-func (c *DefaultCtx) Charset() string {
-	contentType := c.fasthttp.Request.Header.ContentType()
-	_, params, ok := bytes.Cut(contentType, []byte{';'})
-	if !ok {
-		return ""
-	}
-	for len(params) > 0 {
-		// Slice off the next parameter at the next ";" that sits outside a
-		// quoted-string: parameter values may be quoted and contain ";"
-		// (RFC 9110 Section 5.6.6). A DQUOTE only opens a quoted-string at
-		// the start of a value (after an "=" plus optional whitespace), so a
-		// stray quote later in an unquoted value cannot swallow the rest of
-		// the header.
-		param := params
-		end := -1
-		inQuotes := false
-		escaped := false
-		expectValue := false
-	scan:
-		for i := 0; i < len(params); i++ {
-			ch := params[i]
-			switch {
-			case escaped:
-				escaped = false
-			case inQuotes:
-				switch ch {
-				case '\\':
-					escaped = true
-				case '"':
-					inQuotes = false
-				}
-			case ch == '=':
-				expectValue = true
-			case ch == '"' && expectValue:
-				inQuotes = true
-				expectValue = false
-			case ch == ';':
-				end = i
-				break scan
-			case ch != ' ' && ch != '\t':
-				expectValue = false
-			}
-		}
-		if end >= 0 {
-			param = params[:end]
-			params = params[end+1:]
-		} else {
-			params = nil
-		}
-
-		name, value, ok := bytes.Cut(param, []byte{'='})
-		if !ok || !utils.EqualFold(utils.TrimSpace(name), []byte("charset")) {
+func (r *DefaultReq) Charset() string {
+	for name, v := range mediatype.Params(r.c.fasthttp.Request.Header.ContentType()) {
+		if !utils.EqualFold(name, []byte("charset")) {
 			continue
 		}
-		v := utils.TrimSpace(value)
 		if len(v) > 0 && v[0] == '"' {
 			// A quoted value must be a complete quoted-string, and its
 			// quoted-pairs must be replaced with the escaped octet
@@ -328,8 +355,8 @@ func (c *DefaultCtx) Charset() string {
 			if len(v) < 2 || v[len(v)-1] != '"' {
 				return ""
 			}
-			unescaped, err := unescapeHeaderValue(v[1 : len(v)-1])
-			if err != nil {
+			unescaped, ok := mediatype.Unescape(v[1 : len(v)-1])
+			if !ok {
 				return ""
 			}
 			v = unescaped
@@ -339,44 +366,44 @@ func (c *DefaultCtx) Charset() string {
 			// charset parameter later in the header can still be found.
 			continue
 		}
-		return c.app.toString(v)
+		return r.c.app.toString(v)
 	}
 	return ""
 }
 
 // IsJSON reports whether the Content-Type header is JSON.
-func (c *DefaultCtx) IsJSON() bool {
-	return utils.EqualFold(c.MediaType(), MIMEApplicationJSON)
+func (r *DefaultReq) IsJSON() bool {
+	return utils.EqualFold(r.MediaType(), MIMEApplicationJSON)
 }
 
 // IsForm reports whether the Content-Type header is form-encoded.
-func (c *DefaultCtx) IsForm() bool {
-	return utils.EqualFold(c.MediaType(), MIMEApplicationForm)
+func (r *DefaultReq) IsForm() bool {
+	return utils.EqualFold(r.MediaType(), MIMEApplicationForm)
 }
 
 // IsMultipart reports whether the Content-Type header is multipart form data.
-func (c *DefaultCtx) IsMultipart() bool {
-	return utils.EqualFold(c.MediaType(), MIMEMultipartForm)
+func (r *DefaultReq) IsMultipart() bool {
+	return utils.EqualFold(r.MediaType(), MIMEMultipartForm)
 }
 
 // AcceptsJSON reports whether the Accept header allows JSON.
-func (c *DefaultCtx) AcceptsJSON() bool {
-	return c.Accepts(MIMEApplicationJSON) != ""
+func (r *DefaultReq) AcceptsJSON() bool {
+	return r.Accepts(MIMEApplicationJSON) != ""
 }
 
 // AcceptsHTML reports whether the Accept header allows HTML.
-func (c *DefaultCtx) AcceptsHTML() bool {
-	return c.Accepts(MIMETextHTML) != ""
+func (r *DefaultReq) AcceptsHTML() bool {
+	return r.Accepts(MIMETextHTML) != ""
 }
 
 // AcceptsXML reports whether the Accept header allows XML.
-func (c *DefaultCtx) AcceptsXML() bool {
-	return c.Accepts(MIMEApplicationXML, MIMETextXML) != ""
+func (r *DefaultReq) AcceptsXML() bool {
+	return r.Accepts(MIMEApplicationXML, MIMETextXML) != ""
 }
 
 // AcceptsEventStream reports whether the Accept header allows text/event-stream.
-func (c *DefaultCtx) AcceptsEventStream() bool {
-	return c.Accepts(MIMETextEventStream) != ""
+func (r *DefaultReq) AcceptsEventStream() bool {
+	return r.Accepts(MIMETextEventStream) != ""
 }
 
 // Cookies are used for getting a cookie value by key.
@@ -386,6 +413,35 @@ func (c *DefaultCtx) AcceptsEventStream() bool {
 // Make copies or use the Immutable setting to use the value outside the Handler.
 func (r *DefaultReq) Cookies(key string, defaultValue ...string) string {
 	return defaultString(r.c.app.toString(r.c.fasthttp.Request.Header.Cookie(key)), defaultValue)
+}
+
+// CookieNames returns the request cookie names in header order, or nil when
+// there are none. A repeated name appears once per occurrence, which is how the
+// shadowing AllCookies collapses is detected. The strings are copies.
+func (r *DefaultReq) CookieNames() []string {
+	var names []string
+	for key := range r.c.fasthttp.Request.Header.Cookies() {
+		names = append(names, string(key))
+	}
+	return names
+}
+
+// AllCookies returns the request cookies as a name/value map, or nil when there
+// are none. A repeated name resolves to its first occurrence, as Cookies does,
+// so a shadowed cookie cannot be validated in one and consumed in the other.
+func (r *DefaultReq) AllCookies() map[string]string {
+	var cookies map[string]string
+	for key, value := range r.c.fasthttp.Request.Header.Cookies() {
+		name := string(key)
+		if _, seen := cookies[name]; seen {
+			continue
+		}
+		if cookies == nil {
+			cookies = make(map[string]string)
+		}
+		cookies[name] = string(value)
+	}
+	return cookies
 }
 
 // Request return the *fasthttp.Request object
@@ -476,9 +532,11 @@ func (r *DefaultReq) Fresh() bool {
 
 	// fields
 	// List-based fields may be split across multiple field lines, which are
-	// semantically one comma-joined list (RFC 9110 Section 5.2).
-	modifiedSince := header.Peek(HeaderIfModifiedSince)
-	noneMatch := joinHeaderValues(header.PeekAll(HeaderIfNoneMatch))
+	// semantically one comma-joined list (RFC 9110 Section 5.2). Field names
+	// match case-insensitively, so the lower-case spellings HTTP/2 and 3 send
+	// are not read as an unconditional request.
+	modifiedSince := r.headerField(HeaderIfModifiedSince)
+	noneMatch := peekJoinedRequestHeader(header, HeaderIfNoneMatch)
 
 	// unconditional request
 	if len(modifiedSince) == 0 && len(noneMatch) == 0 {
@@ -488,7 +546,7 @@ func (r *DefaultReq) Fresh() bool {
 	// Always return stale when Cache-Control: no-cache
 	// to support end-to-end reload requests
 	// https://www.rfc-editor.org/rfc/rfc9111#section-5.2.1.4
-	cacheControl := joinHeaderValues(header.PeekAll(HeaderCacheControl))
+	cacheControl := peekJoinedRequestHeader(header, HeaderCacheControl)
 	if len(cacheControl) > 0 && isNoCache(utils.UnsafeString(cacheControl)) {
 		return false
 	}
@@ -555,6 +613,28 @@ func parseHTTPDate(date []byte) (time.Time, error) {
 	return t, nil
 }
 
+// IfNoneMatch returns the entity tags in the If-None-Match request header,
+// verbatim and unvalidated; a comma inside a quoted opaque-tag does not split
+// one. Fresh already compares them. Only valid within the handler.
+func (r *DefaultReq) IfNoneMatch() []string {
+	header := peekJoinedRequestHeader(&r.c.fasthttp.Request.Header, HeaderIfNoneMatch)
+	if len(header) == 0 {
+		return nil
+	}
+	return etagpkg.Split(r.c.app.toString(header))
+}
+
+// IfModifiedSince returns the time carried by the If-Modified-Since request
+// header, ErrHeaderNotFound when it is absent or empty, and a parse error when
+// it is none of the HTTP-date formats RFC 9110 Section 5.6.7 requires.
+func (r *DefaultReq) IfModifiedSince() (time.Time, error) {
+	value := r.headerField(HeaderIfModifiedSince)
+	if len(value) == 0 {
+		return time.Time{}, ErrHeaderNotFound
+	}
+	return parseHTTPDate(value)
+}
+
 // Get returns the HTTP request header specified by field.
 // Field names are case-insensitive
 // Returned value is only valid within the handler. Do not store any references.
@@ -568,11 +648,66 @@ func (r *DefaultReq) Get(key string, defaultValue ...string) string {
 // If the generic type cannot be matched to a supported type, the function
 // returns the default value (if provided) or the zero value of type V.
 func GetReqHeader[V GenericType](c Ctx, key string, defaultValue ...V) V {
-	v, err := genericParseType[V](c.App().toString(c.Request().Header.Peek(key)))
+	v, err := genericParseType[V](c.App().toString(c.Req().headerField(key)))
 	if err != nil && len(defaultValue) > 0 {
 		return defaultValue[0]
 	}
 	return v
+}
+
+// GetAll returns every field line stored under key, where Get returns only the
+// first, or nil when the header is absent. Empty lines are skipped, so its
+// presence answers as HasHeader does. Only valid within the handler.
+func (r *DefaultReq) GetAll(key string) []string {
+	app := r.c.app
+	lines := fieldname.Lines(&r.c.fasthttp.Request.Header, key, !app.config.DisableHeaderNormalizing)
+
+	var values []string
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		values = append(values, app.toString(line))
+	}
+	return values
+}
+
+// Authorization splits the Authorization header into auth-scheme and credentials
+// (RFC 9110 Section 11.6.2), neither decoded nor validated. They view the request
+// buffer: a credential kept past the handler becomes another request's.
+func (r *DefaultReq) Authorization() (scheme, credentials string) { //nolint:nonamedreturns // gocritic unnamedResult requires naming the two halves for clarity
+	rawScheme, rawCredentials := r.authorizationParts()
+	app := r.c.app
+	return app.toString(rawScheme), app.toString(rawCredentials)
+}
+
+// authorizationParts splits the Authorization header at the first space or tab
+// (RFC 9110 Section 11.4), on raw bytes so each caller materializes only the
+// strings it needs. A lone token is a scheme without credentials.
+func (r *DefaultReq) authorizationParts() (scheme, credentials []byte) { //nolint:nonamedreturns // the two halves need naming for clarity
+	raw := utils.TrimSpace(r.headerField(HeaderAuthorization))
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	i := utils.IndexAny2(raw, ' ', '\t')
+	if i < 0 {
+		return raw, nil
+	}
+	return raw[:i], utils.TrimSpace(raw[i+1:])
+}
+
+// Bearer returns the credentials of a Bearer Authorization header (RFC 6750
+// Section 2.1), unverified, or "" for another scheme. It views the request
+// buffer: a token kept past the handler becomes another request's.
+func (r *DefaultReq) Bearer() string {
+	// The scheme is compared on the raw bytes rather than through Authorization,
+	// so a header naming another scheme costs no string at all and a Bearer one
+	// materializes only the token.
+	scheme, credentials := r.authorizationParts()
+	if len(credentials) == 0 || !utils.EqualFold(utils.UnsafeString(scheme), "Bearer") {
+		return ""
+	}
+	return r.c.app.toString(credentials)
 }
 
 // GetHeaders (a.k.a GetReqHeaders) returns the HTTP request headers.
@@ -600,7 +735,7 @@ func (r *DefaultReq) GetHeaders() map[string][]string {
 func (r *DefaultReq) Host() string {
 	if r.IsProxyTrusted() {
 		if host := r.Get(HeaderXForwardedHost); host != "" {
-			if before, _, found := strings.Cut(host, ","); found {
+			if before, _, found := utils.CutByte(host, ','); found {
 				return utils.TrimSpace(before)
 			}
 			return utils.TrimSpace(host)
@@ -633,8 +768,10 @@ func (r *DefaultReq) Port() string {
 		return ""
 	}
 
-	_, port, err := net.SplitHostPort(addr.String())
-	if err != nil {
+	// utils.SplitHostPort applies net.SplitHostPort's rules but reports a
+	// miss as ok == false, so an address without a port costs no *net.AddrError.
+	_, port, ok := utils.SplitHostPort(addr.String())
+	if !ok {
 		return ""
 	}
 
@@ -642,10 +779,17 @@ func (r *DefaultReq) Port() string {
 }
 
 // IP returns the client's IP address. When the request comes from a trusted proxy (see
-// [TrustProxyConfig]), the value is extracted from the configured ProxyHeader by walking the
-// X-Forwarded-For chain right-to-left and skipping all trusted proxy IPs; the first
-// non-trusted IP in the chain is returned. Please use Config.TrustProxy to prevent header
-// spoofing if your app is behind a proxy.
+// [TrustProxyConfig]) and Config.ProxyHeader is set, the value is taken from that header.
+// With Config.EnableIPValidation enabled and proxy IPs or ranges configured (Proxies,
+// Loopback, Private or LinkLocal), the X-Forwarded-For chain is walked right-to-left, every
+// trusted proxy IP is skipped and the first non-trusted IP is returned; with validation
+// enabled but only UnixSocket trusted, the first valid IP from the left is returned. With
+// validation disabled (the default), the raw header value is returned as-is, which for
+// X-Forwarded-For may be the whole comma-separated chain. Enable validation whenever the
+// result is used as a single client identifier and the header can carry a chain, for example
+// by the limiter middleware or an allowlist; a proxy that overwrites the header with one
+// address, or a single-IP header, does not need it. Please use Config.TrustProxy to prevent
+// header spoofing if your app is behind a proxy.
 func (r *DefaultReq) IP() string {
 	app := r.c.app
 	if r.IsProxyTrusted() && app.config.ProxyHeader != "" {
@@ -699,15 +843,16 @@ func (r *DefaultReq) extractIPsFromHeader(header string) []string {
 			j++
 		}
 
-		for i < j && (headerValue[i] == ' ' || headerValue[i] == ',') {
+		for i < j && headerValue[i] == ',' {
 			i++
 		}
 
-		s := utils.TrimRight(headerValue[i:j], ' ')
+		s := headerlist.TrimOWS(headerValue[i:j])
 
 		if r.c.app.config.EnableIPValidation {
-			// Skip validation if IP is clearly not IPv4/IPv6; otherwise, validate without allocations
-			if (!v6 && !v4) || (v6 && !utils.IsIPv6(s)) || (v4 && !utils.IsIPv4(s)) {
+			// Skip validation if IP is clearly not IPv4/IPv6; otherwise, validate without allocations.
+			// A colon decides: an IPv4-mapped IPv6 address carries both separators.
+			if (!v6 && !v4) || (v6 && !utils.IsIPv6(s)) || (!v6 && v4 && !utils.IsIPv4(s)) {
 				continue
 			}
 		}
@@ -740,7 +885,7 @@ func (r *DefaultReq) extractIPFromHeader(header string) string {
 				end++
 			}
 
-			ipStr := utils.Trim(headerValue[start:end], ' ')
+			ipStr := headerlist.TrimOWS(headerValue[start:end])
 			if isValidProxyIP(ipStr) {
 				return ipStr
 			}
@@ -759,7 +904,7 @@ func (r *DefaultReq) extractIPFromHeader(header string) string {
 			start--
 		}
 
-		ipStr := utils.Trim(headerValue[start:end], ' ')
+		ipStr := headerlist.TrimOWS(headerValue[start:end])
 		if isValidProxyIP(ipStr) {
 			leftmostIP = ipStr
 			if !r.isTrustedProxyIP(ipStr) {
@@ -791,11 +936,11 @@ func proxyHeaderValue(r *DefaultReq, header string) string {
 }
 
 func isValidProxyIP(ipStr string) bool {
-	hasIPv4Separator := strings.IndexByte(ipStr, '.') >= 0
-	hasIPv6Separator := strings.IndexByte(ipStr, ':') >= 0
-	return (hasIPv4Separator || hasIPv6Separator) &&
-		(!hasIPv4Separator || utils.IsIPv4(ipStr)) &&
-		(!hasIPv6Separator || utils.IsIPv6(ipStr))
+	if strings.IndexByte(ipStr, ':') >= 0 {
+		// A colon makes it IPv6, including the IPv4-mapped form ::ffff:a.b.c.d (RFC 4291 §2.2).
+		return utils.IsIPv6(ipStr)
+	}
+	return strings.IndexByte(ipStr, '.') >= 0 && utils.IsIPv4(ipStr)
 }
 
 // hasTrustedProxyConfig returns true if any trusted proxy configuration is set.
@@ -815,6 +960,8 @@ func (r *DefaultReq) isTrustedProxyIP(ipStr string) bool {
 		if ip, ok = utils.ParseIPv6(ipStr); !ok {
 			return false
 		}
+		// An IPv4-mapped address names an IPv4 proxy: look it up as that, as net.IP does for the peer.
+		ip = ip.Unmap()
 	}
 
 	if cfg.Loopback && ip.IsLoopback() {
@@ -868,12 +1015,128 @@ func (r *DefaultReq) Is(extension string) bool {
 		return false
 	}
 
-	ct := r.c.app.toString(r.c.fasthttp.Request.Header.ContentType())
-	if i := strings.IndexByte(ct, ';'); i != -1 {
-		ct = ct[:i]
+	ct := mediatype.StripParams(r.c.fasthttp.Request.Header.ContentType())
+	return utils.EqualFold(utils.UnsafeString(ct), extensionHeader)
+}
+
+// HasBody returns true if the request declares a body via Content-Length, Transfer-Encoding, or already buffered payload data.
+func (r *DefaultReq) HasBody() bool {
+	hdr := &r.c.fasthttp.Request.Header
+
+	switch cl := hdr.ContentLength(); {
+	case cl > 0:
+		return true
+	case cl == -1:
+		// fasthttp reports -1 for Transfer-Encoding: chunked bodies.
+		return true
+	case cl == 0:
+		if hasTransferEncodingBody(hdr) {
+			return true
+		}
 	}
-	ct = utils.TrimSpace(ct)
-	return utils.EqualFold(ct, extensionHeader)
+
+	return len(r.c.fasthttp.Request.Body()) > 0
+}
+
+func hasTransferEncodingBody(hdr *fasthttp.RequestHeader) bool {
+	// Repeated field lines form one combined list (RFC 9110 Section 5.2),
+	// so every Transfer-Encoding line must be inspected, not just the first.
+	if lines := hdr.PeekAll(HeaderTransferEncoding); len(lines) > 0 {
+		for _, line := range lines {
+			if transferEncodingLineHasBody(utils.UnsafeString(line)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Fallback scan for non-normalized header keys.
+	for key, value := range hdr.All() {
+		if !utils.EqualFold(utils.UnsafeString(key), HeaderTransferEncoding) {
+			continue
+		}
+		if transferEncodingLineHasBody(utils.UnsafeString(value)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// transferEncodingLineHasBody reports whether a single Transfer-Encoding
+// field line contains a transfer coding other than "identity".
+func transferEncodingLineHasBody(te string) bool {
+	for token := range headerlist.All(te) {
+		// A transfer coding may carry parameters ("chunked;q=1"), which name the
+		// coding no more than the bare token does (RFC 9110 Section 10.1.4).
+		if idx := strings.IndexByte(token, ';'); idx >= 0 {
+			token = utils.TrimSpace(token[:idx])
+		}
+		if token == "" || utils.EqualFold(token, "identity") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// IsWebSocket returns true if the request includes a WebSocket upgrade handshake.
+func (r *DefaultReq) IsWebSocket() bool {
+	// Repeated field lines are equivalent to one combined comma-separated
+	// list (RFC 9110 Section 5.2), so inspect every Connection and Upgrade
+	// field line, not just the first.
+	hdr := &r.c.fasthttp.Request.Header
+	canonical := !r.c.app.config.DisableHeaderNormalizing
+	if !headerListContainsToken(fieldname.Lines(hdr, HeaderConnection, canonical), "upgrade") {
+		return false
+	}
+	// Upgrade is a list of protocols, each optionally carrying a "/version"
+	// suffix (RFC 9110 Section 7.8), e.g. "Upgrade: websocket, h2c".
+	return headerListContainsToken(fieldname.Lines(hdr, HeaderUpgrade, canonical), "websocket")
+}
+
+// headerListContainsToken reports whether any comma-separated element across
+// the given field lines equals token case-insensitively. An optional
+// "/version" suffix (Upgrade protocol syntax, RFC 9110 Section 7.8) is
+// ignored when comparing; valid Connection members never contain "/", so
+// this is safe for both headers.
+func headerListContainsToken(lines [][]byte, token string) bool {
+	for element := range headerlist.AllLines(lines) {
+		// Connection and Upgrade carry protocol names, which may name a version
+		// after a slash ("HTTP/2.0"). Match on the name alone.
+		if i := strings.IndexByte(element, '/'); i >= 0 {
+			element = element[:i]
+		}
+		if utils.EqualFold(element, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPreflight returns true if the request is a CORS preflight.
+func (r *DefaultReq) IsPreflight() bool {
+	if r.Method() != MethodOptions {
+		return false
+	}
+	if len(r.headerField(HeaderAccessControlRequestMethod)) == 0 {
+		return false
+	}
+	return len(r.headerField(HeaderOrigin)) > 0
+}
+
+// Secure returns whether a secure connection was established.
+func (r *DefaultReq) Secure() bool {
+	return r.Scheme() == schemeHTTPS
+}
+
+// xmlHTTPRequestBytes is precomputed for XHR detection
+var xmlHTTPRequestBytes = []byte("xmlhttprequest")
+
+// XHR returns a Boolean property, that is true, if the request's X-Requested-With header field is XMLHttpRequest,
+// indicating that the request was issued by a client library (such as jQuery).
+func (r *DefaultReq) XHR() bool {
+	return utils.EqualFold(r.headerField(HeaderXRequestedWith), xmlHTTPRequestBytes)
 }
 
 // Locals makes it possible to pass any values under keys scoped to the request
@@ -882,6 +1145,9 @@ func (r *DefaultReq) Is(extension string) bool {
 // All the values are removed from ctx after returning from the top
 // RequestHandler. Additionally, Close method is called on each value
 // implementing io.Closer before removing the value from ctx.
+//
+// Storing through the Ctx interface heap-allocates the one-element slice the
+// variadic value is packed into; SetLocal stores the same value without it.
 func (r *DefaultReq) Locals(key any, value ...any) any {
 	if r.c.fasthttp == nil {
 		if len(value) > 0 {
@@ -894,6 +1160,34 @@ func (r *DefaultReq) Locals(key any, value ...any) any {
 	}
 	r.c.fasthttp.SetUserValue(key, value[0])
 	return value[0]
+}
+
+// SetLocal stores value under key scoped to the request, exactly as
+// Locals(key, value) does: the value is available to all following routes that
+// match the request, removed after the top RequestHandler returns, and its
+// Close method is called first if it implements io.Closer. Like Locals, it
+// stores nothing while the context is released. A Ctx must not be used past
+// its handler either way, because the pool hands the same one to the next
+// request.
+//
+// Locals takes its value variadically, and reached through the Ctx interface
+// the compiler cannot see that the callee only reads that argument, so the
+// one-element "..." slice is heap-allocated on every call. SetLocal takes the
+// value directly, so that slice is never built. Boxing a value that is not
+// already an interface still allocates, exactly as it does for Locals.
+func (r *DefaultReq) SetLocal(key, value any) {
+	c := r.c
+	if c.fasthttp == nil {
+		return
+	}
+	// A custom Ctx is entitled to override Locals, and this stores what
+	// Locals(key, value) stores, so the override is the one that must run.
+	// It pays the slice the default path exists to avoid, as setLocal does.
+	if handlerCtx := c.handlerCtx; handlerCtx != nil {
+		handlerCtx.Locals(key, value)
+		return
+	}
+	c.fasthttp.SetUserValue(key, value)
 }
 
 // Locals function utilizing Go's generics feature.
@@ -909,7 +1203,9 @@ func Locals[V any](c Ctx, key any, value ...V) V {
 	if len(value) == 0 {
 		v, ok = c.Locals(key).(V)
 	} else {
-		v, ok = c.Locals(key, value[0]).(V)
+		// Set through setLocal so the store does not pay for the
+		// heap-allocated one-element slice an interface Locals call costs.
+		v, ok = setLocal(c, key, value[0]).(V)
 	}
 	if !ok {
 		return v // return zero of type V
@@ -943,6 +1239,12 @@ func (r *DefaultReq) Method(override ...string) string {
 		// return current method
 		return currentMethod(r.c)
 	}
+	if methodInt == r.c.methodInt {
+		return method
+	}
+	// A middleware sits at a position of its own in every method's tree, so
+	// carry the index over or Next would skip the routes before it.
+	r.c.indexRoute = app.routeIndexInTree(methodInt, r.c.treePathHash, r.c.route, r.c.indexRoute)
 	r.c.methodInt = methodInt
 	// Method changed; invalidate the lookahead index
 	r.c.firstMatchIndex = -1
@@ -965,6 +1267,19 @@ func currentMethod(c *DefaultCtx) string {
 	// the handler; an unsafe alias into the request buffer would be
 	// silently corrupted on connection reuse.
 	return string(c.fasthttp.Request.Header.Method())
+}
+
+// IsSafe reports whether the request method is safe, meaning it is not expected
+// to change server state (RFC 9110 Section 9.2.1).
+func (r *DefaultReq) IsSafe() bool {
+	return IsMethodSafe(r.Method())
+}
+
+// IsIdempotent reports whether the request method is idempotent, meaning
+// repeating it has the same intended effect as making it once (RFC 9110
+// Section 9.2.2). Every safe method is also idempotent.
+func (r *DefaultReq) IsIdempotent() bool {
+	return IsMethodIdempotent(r.Method())
 }
 
 // MultipartForm parse form entries from binary.
@@ -990,6 +1305,38 @@ func (r *DefaultReq) MultipartForm() (*multipart.Form, error) {
 // Make copies or use the Immutable setting to use the value outside the Handler.
 func (r *DefaultReq) OriginalURL() string {
 	return r.c.app.toString(r.c.fasthttp.Request.Header.RequestURI())
+}
+
+// URI returns the parsed *fasthttp.URI of the request, giving access to all
+// fasthttp URI methods. It is owned by the request and rewritten by a Path
+// override, so it is only valid within the handler.
+func (r *DefaultReq) URI() *fasthttp.URI {
+	return r.c.fasthttp.Request.URI()
+}
+
+// Path returns the path part of the request URL, normalized before routing
+// (see Config.UnescapePath); OriginalURL returns the request target as sent.
+// Optionally, you could override the path.
+// Make copies or use the Immutable setting to use the value outside the Handler.
+func (r *DefaultReq) Path(override ...string) string {
+	if len(override) != 0 && string(r.c.path) != override[0] {
+		// Set new path to context
+		r.c.pathOriginal = override[0]
+
+		// Set new path to request context
+		r.c.fasthttp.Request.URI().SetPath(r.c.pathOriginal)
+		// An override is off the request hot path, so scan the new path rather
+		// than repeat the length comparison Reset makes.
+		r.c.pathNeedsNorm = needsPathNormalization(r.c.pathOriginal)
+		// Prettify path
+		r.c.configDependentPaths()
+		// The detection path/tree hash changed; invalidate the lookahead index.
+		r.c.firstMatchIndex = -1
+		// The new path may live in another bucket, so carry the index over for
+		// Next to resume after this route.
+		r.c.indexRoute = r.c.app.routeIndexInTree(r.c.methodInt, r.c.treePathHash, r.c.route, r.c.indexRoute)
+	}
+	return r.c.app.toString(r.c.path)
 }
 
 // Params is used to get the route parameters.
@@ -1067,7 +1414,7 @@ func (r *DefaultReq) Scheme() string {
 			if utils.EqualFold(key, xForwardedProtoBytes) ||
 				utils.EqualFold(key, xForwardedProtocolBytes) {
 				v := app.toString(val)
-				if before, _, found := strings.Cut(v, ","); found {
+				if before, _, found := utils.CutByte(v, ','); found {
 					v = before
 				}
 				if forwarded, ok := forwardedScheme(v); ok {
@@ -1207,7 +1554,7 @@ func (r *DefaultReq) Range(size int64) (Range, error) {
 		return int64(parsed), nil
 	}
 
-	before, after, found := strings.Cut(rangeStr, "=")
+	before, after, found := utils.CutByte(rangeStr, '=')
 	if !found {
 		return Range{}, ErrRangeMalformed
 	}
@@ -1328,6 +1675,11 @@ func (r *DefaultReq) Range(size int64) (Range, error) {
 	return rangeData, nil
 }
 
+// Endpoint returns the route that will handle this request. See Ctx.Endpoint.
+func (r *DefaultReq) Endpoint() *Route {
+	return r.c.Endpoint()
+}
+
 // Route returns the matched Route struct.
 func (r *DefaultReq) Route() *Route {
 	return r.c.Route()
@@ -1408,7 +1760,9 @@ func (r *DefaultReq) Stale() bool {
 // If Config.TrustProxy false, it returns false.
 // IsProxyTrusted can check remote ip by proxy ranges and ip map.
 func (r *DefaultReq) IsProxyTrusted() bool {
-	config := r.c.app.config
+	// By pointer: Config is over 600 bytes, and copying it to read one bool cost
+	// more than the rest of this function on every IP, Scheme, Host and BaseURL.
+	config := &r.c.app.config
 	if !config.TrustProxy {
 		return false
 	}

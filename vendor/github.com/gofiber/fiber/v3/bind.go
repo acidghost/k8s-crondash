@@ -74,26 +74,21 @@ func (e *BindError) Unwrap() error {
 }
 
 func extractFieldFromError(err error) string {
-	var convErr schema.ConversionError
-	if errors.As(err, &convErr) {
+	if convErr, ok := errors.AsType[schema.ConversionError](err); ok {
 		return convErr.Key
 	}
-	var unknownKey schema.UnknownKeyError
-	if errors.As(err, &unknownKey) {
+	if unknownKey, ok := errors.AsType[schema.UnknownKeyError](err); ok {
 		return unknownKey.Key
 	}
-	var emptyField schema.EmptyFieldError
-	if errors.As(err, &emptyField) {
+	if emptyField, ok := errors.AsType[schema.EmptyFieldError](err); ok {
 		return emptyField.Key
 	}
-	var multiErr schema.MultiError
-	if errors.As(err, &multiErr) {
+	if multiErr, ok := errors.AsType[schema.MultiError](err); ok {
 		for k := range multiErr {
 			return k
 		}
 	}
-	var unmarshalErr *json.UnmarshalTypeError
-	if errors.As(err, &unmarshalErr) {
+	if unmarshalErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 		return unmarshalErr.Field
 	}
 	return ""
@@ -149,7 +144,9 @@ func (b *Bind) WithAutoHandling() *Bind {
 	return b
 }
 
-// SkipValidation enables or disables struct validation for the current bind chain.
+// SkipValidation enables or disables struct validation. The setting stays on the
+// Bind that c.Bind() returns, so it applies to every later bind of the request
+// until SkipValidation is called again, and ends with the request.
 func (b *Bind) SkipValidation(skip bool) *Bind {
 	b.shouldSkipValidation = skip
 
@@ -393,9 +390,11 @@ func (b *Bind) MsgPack(out any) error {
 // Body binds the request body into the struct, map[string]string and map[string][]string.
 // Returns *BindError on parse failure (manual mode) or *Error with status 400 (auto-handling mode).
 // It supports decoding the following content types based on the Content-Type header:
-// application/json, application/xml, application/x-www-form-urlencoded, multipart/form-data
-// If none of the content types above are matched, it'll take a look custom binders by checking the MIMETypes() method of custom binder.
-// If there is no custom binder for mime type of body, it will return a ErrUnprocessableEntity error.
+// application/json, application/vnd.msgpack, application/xml, text/xml, application/cbor,
+// application/x-www-form-urlencoded, multipart/form-data
+// Custom binders are checked first, so the first one whose MIMETypes() holds the
+// request's content type runs instead of the built-in decoder for that type.
+// If neither matches the content type, it will return an ErrUnprocessableEntity error.
 func (b *Bind) Body(out any) error {
 	ctype := bindMediaType(&b.ctx.RequestCtx().Request.Header)
 
