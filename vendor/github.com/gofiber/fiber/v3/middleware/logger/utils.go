@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/internal/bodystream"
 	"github.com/gofiber/fiber/v3/internal/logtemplate"
 	fiberlog "github.com/gofiber/fiber/v3/log"
 	"github.com/gofiber/utils/v2"
@@ -104,9 +105,52 @@ func writeSanitized(output Buffer, p []byte) (int, error) {
 	return logtemplate.WriteSanitized(output, p)
 }
 
+// bufferBodyStream bounds a streamed body before Body or FormValue would answer one past
+// BodyLimit 413 and so replace the response the handler already chose.
+func bufferBodyStream(c fiber.Ctx) error {
+	req := c.Request()
+	if !req.IsBodyStream() {
+		return nil
+	}
+	return bodystream.Buffer(req, c.App().Server().MaxRequestBodySize)
+}
+
 // writeSanitizedString is writeSanitized for strings.
 func writeSanitizedString(output Buffer, s string) (int, error) {
 	return logtemplate.WriteSanitizedString(output, s)
+}
+
+// writeColored writes value between the two color escapes. Both the sequences
+// and value are written verbatim: it backs the tags whose uncolored branch
+// also writes value unscrubbed, so wrapping it in color must not change what
+// reaches the log.
+func writeColored(output Buffer, color, value, reset string) (int, error) {
+	n, err := output.WriteString(color)
+	if err != nil {
+		return n, err
+	}
+	m, err := output.WriteString(value)
+	n += m
+	if err != nil {
+		return n, err
+	}
+	m, err = output.WriteString(reset)
+	return n + m, err
+}
+
+// writeColoredInt is writeColored for a decimal right-aligned to width.
+func writeColoredInt(output Buffer, color string, v, width int, reset string) (int, error) {
+	n, err := output.WriteString(color)
+	if err != nil {
+		return n, err
+	}
+	m, err := appendIntTag(output, v, width)
+	n += m
+	if err != nil {
+		return n, err
+	}
+	m, err = output.WriteString(reset)
+	return n + m, err
 }
 
 // writeSanitizedColored writes value between the two color escapes, scrubbing
