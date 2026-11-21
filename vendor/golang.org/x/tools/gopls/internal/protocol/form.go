@@ -8,7 +8,10 @@
 
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // InteractiveResolveOptions represents the server capabilities for interactive
 // resolve.
@@ -20,12 +23,25 @@ type InteractiveResolveOptions struct {
 	Kinds []string `json:"kinds"`
 }
 
+// FormFieldKind represents the supported input kinds for form fields.
+type FormFieldKind string
+
+const (
+	FormFieldKindString   FormFieldKind = "string"
+	FormFieldKindFile     FormFieldKind = "file"
+	FormFieldKindBool     FormFieldKind = "bool"
+	FormFieldKindNumber   FormFieldKind = "number"
+	FormFieldKindEnum     FormFieldKind = "enum"
+	FormFieldKindLazyEnum FormFieldKind = "lazyEnum"
+	FormFieldKindList     FormFieldKind = "list"
+)
+
 // InteractiveResolveClientCapabilities represents the client capabilities for
 // interactive resolve.
 type InteractiveResolveClientCapabilities struct {
 	// The input types the client supports for interactive dialogs.
 	// The presence of this field implies support for interactive refactoring.
-	InputTypes []string `json:"inputTypes"`
+	InputTypes []FormFieldKind `json:"inputTypes"`
 }
 
 // FormFieldTypeString defines a text input.
@@ -34,7 +50,7 @@ type InteractiveResolveClientCapabilities struct {
 // adding regex validation or file URI constraints.
 type FormFieldTypeString struct {
 	// Kind must be "string".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 }
 
 // FileExistence whether the file denoted by a DocumentURI exists.
@@ -73,7 +89,7 @@ const (
 // https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#documentUri
 type FormFieldTypeFile struct {
 	// Kind must be "file".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 
 	// Existence constraint.
 	Existence FileExistence `json:"existence"`
@@ -93,7 +109,7 @@ type FormFieldTypeFile struct {
 // FormFieldTypeBool defines a boolean input.
 type FormFieldTypeBool struct {
 	// Kind must be "bool".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 }
 
 // FormFieldTypeNumber defines a numeric input.
@@ -102,7 +118,7 @@ type FormFieldTypeBool struct {
 // adding range constraints (min/max) or precision requirements.
 type FormFieldTypeNumber struct {
 	// Kind must be "number".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 }
 
 // FormEnumEntry represents a single option in an enumeration.
@@ -124,7 +140,7 @@ type FormEnumEntry struct {
 // - All options are known at the time the form is created.
 type FormFieldTypeEnum struct {
 	// Kind must be "enum".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 
 	// Entries is the list of allowable options.
 	Entries []FormEnumEntry `json:"entries"`
@@ -142,7 +158,7 @@ type FormFieldTypeEnum struct {
 // a text input) and query the server via 'interactive/listEnum' as the user types.
 type FormFieldTypeLazyEnum struct {
 	// Kind must be "lazyEnum".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 
 	// TODO(hxjiang): consider make debounce configurable since fetching
 	// cloud resources could be expensive and slow.
@@ -161,7 +177,7 @@ type FormFieldTypeLazyEnum struct {
 // FormFieldTypeList defines a homogeneous list of items.
 type FormFieldTypeList struct {
 	// Kind must be "list".
-	Kind string `json:"kind"`
+	Kind FormFieldKind `json:"kind"`
 
 	// ElementType specifies the type of the items in the list.
 	// It must be one of the FormFieldType* structs (e.g., FormFieldTypeString).
@@ -210,6 +226,36 @@ type FormAnswer struct {
 
 	// The user's answer value.
 	Value any `json:"value"`
+}
+
+// Answer returns the answer with the given ID, converted to T.
+//
+// An absent answer is not an error: exist reports whether the form has one,
+// and its absence is for the caller to interpret, since the question may be
+// unanswered or simply optional.
+//
+// An error means the answer is unusable, because the client sent a value that
+// is not a T, or answered the same question more than once. Answer reports
+// these rather than panicking, as the answers come from the client and may not
+// be trusted.
+func (p *InteractiveParams) Answer[T any](id string) (v T, exists bool, err error) {
+	matches := 0
+	for _, ans := range p.FormAnswers {
+		if ans.ID == id {
+			matches++
+			val, ok := ans.Value.(T)
+			if !ok {
+				return v, true, fmt.Errorf("form answer %q has unexpected type %T, want %T", id, ans.Value, v)
+			}
+			v = val
+		}
+	}
+	if matches == 0 {
+		return v, false, nil
+	} else if matches > 1 {
+		return v, true, fmt.Errorf("form contains duplicate answer %q", id)
+	}
+	return v, true, nil
 }
 
 // InteractiveParams facilitates a multi-step, interactive dialogue between the

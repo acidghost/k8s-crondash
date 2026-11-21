@@ -52,7 +52,7 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork AllowNetwork, scopes .
 	eventName := fmt.Sprintf("go/packages.Load #%d", id) // unique name for logging
 
 	var query []string
-	var standalone bool // whether this is a load of a standalone file
+	var standalone bool // whether this is a load of a standalone Go file
 
 	// Keep track of module query -> module path so that we can later correlate query
 	// errors with errors.
@@ -76,15 +76,18 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork AllowNetwork, scopes .
 				panic(fmt.Sprintf("internal error: load called with multiple scopes when a file scope is present (file: %s)", uri))
 			}
 			fh, err := s.ReadFile(ctx, uri)
-			if err != nil || fh == nil || s.FileKind(fh) != file.Go {
-				// Don't try to load a file that doesn't exist, or isn't a go file.
+			if err != nil {
+				continue // e.g. canceled
+			}
+			kind := s.FileKind(fh)
+			if !zeroConfigSupported(kind) {
 				continue
 			}
 			contents, err := fh.Content()
 			if err != nil {
-				continue
+				continue // file does not exist
 			}
-			if isStandaloneFile(contents, s.Options().StandaloneTags) {
+			if kind == file.Go && isStandaloneFile(contents, s.Options().StandaloneTags) {
 				standalone = true
 				query = append(query, uri.Path())
 			} else {
@@ -243,7 +246,7 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork AllowNetwork, scopes .
 			continue
 		}
 		// Skip test main packages.
-		if isTestMain(pkg, s.view.folder.Env.GOCACHE) {
+		if isTestMain(pkg) {
 			continue
 		}
 		// Skip filtered packages. They may be added anyway if they're
@@ -452,6 +455,13 @@ func buildMetadata(updates map[PackageID]*metadata.Package, loadDir string, stan
 		for _, filename := range src {
 			*dst = append(*dst, protocol.URIFromPath(filename))
 		}
+	}
+	// Copy SFiles to AsmFiles.
+	for _, filename := range pkg.OtherFiles {
+		if !strings.HasSuffix(filename, ".s") {
+			continue
+		}
+		mp.AsmFiles = append(mp.AsmFiles, protocol.URIFromPath(filename))
 	}
 	copyURIs(&mp.CompiledGoFiles, pkg.CompiledGoFiles)
 	copyURIs(&mp.GoFiles, pkg.GoFiles)
@@ -801,21 +811,31 @@ checkURIs:
 	return true
 }
 
-func isTestMain(pkg *packages.Package, gocache string) bool {
+func isTestMain(pkg *packages.Package) bool {
 	// Test mains must have an import path that ends with ".test".
 	if !strings.HasSuffix(pkg.PkgPath, ".test") {
 		return false
 	}
-	// Test main packages are always named "main".
+	// Real package paths may also end in ".test", so keep checking the
+	// synthetic test main shape below.
 	if pkg.Name != "main" {
 		return false
 	}
-	// Test mains always have exactly one GoFile that is in the build cache.
-	if len(pkg.GoFiles) > 1 {
+	if len(pkg.GoFiles) == 0 {
 		return false
 	}
-	if !pathutil.InDir(gocache, pkg.GoFiles[0]) {
+	if pkg.Dir == "" {
 		return false
+	}
+	// A synthetic test main package has the Dir of the package under test,
+	// but its generated GoFiles live elsewhere. We avoid relying on the
+	// heuristic that test mains always have exactly one GoFile in GOCACHE,
+	// as that may not be the case for users of GOCACHEPROG, or for future
+	// implementations of go test.
+	for _, goFile := range pkg.GoFiles {
+		if pathutil.InDir(pkg.Dir, goFile) {
+			return false
+		}
 	}
 	return true
 }
