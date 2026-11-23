@@ -2,10 +2,10 @@
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/a-h/parse v0.0.0-20250122154542-74294addb73e
-## explicit; go 1.18
+# github.com/a-h/parse v0.0.42
+## explicit; go 1.26.0
 github.com/a-h/parse
-# github.com/a-h/templ v0.3.1070
+# github.com/a-h/templ v0.3.1118
 ## explicit; go 1.26.0
 github.com/a-h/templ
 github.com/a-h/templ/cmd/templ
@@ -26,9 +26,11 @@ github.com/a-h/templ/cmd/templ/sloghandler
 github.com/a-h/templ/cmd/templ/visualize
 github.com/a-h/templ/generator
 github.com/a-h/templ/internal/format
+github.com/a-h/templ/internal/htmlattr
 github.com/a-h/templ/internal/htmlfind
 github.com/a-h/templ/internal/ignorefile
 github.com/a-h/templ/internal/imports
+github.com/a-h/templ/internal/jstokenizer
 github.com/a-h/templ/internal/lazyloader
 github.com/a-h/templ/internal/prettier
 github.com/a-h/templ/internal/skipdir
@@ -46,7 +48,7 @@ github.com/a-h/templ/safehtml
 # github.com/alecthomas/kong v1.16.1
 ## explicit; go 1.20
 github.com/alecthomas/kong
-# github.com/andybalholm/brotli v1.2.6
+# github.com/andybalholm/brotli v1.3.0
 ## explicit; go 1.22
 github.com/andybalholm/brotli
 github.com/andybalholm/brotli/matchfinder
@@ -158,7 +160,7 @@ github.com/klauspost/compress/zstd/internal/xxhash
 github.com/mailru/easyjson/buffer
 github.com/mailru/easyjson/jlexer
 github.com/mailru/easyjson/jwriter
-# github.com/mattn/go-colorable v0.1.15
+# github.com/mattn/go-colorable v0.1.16
 ## explicit; go 1.18
 github.com/mattn/go-colorable
 # github.com/mattn/go-isatty v0.0.24
@@ -233,10 +235,10 @@ github.com/yosida95/uritemplate/v3
 # go.yaml.in/yaml/v2 v2.4.3
 ## explicit; go 1.15
 go.yaml.in/yaml/v2
-# go.yaml.in/yaml/v3 v3.0.4
+# go.yaml.in/yaml/v3 v3.0.5
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
-# golang.org/x/crypto v0.57.0
+# golang.org/x/crypto v0.58.0
 ## explicit; go 1.26.0
 golang.org/x/crypto/acme
 golang.org/x/crypto/acme/autocert
@@ -245,13 +247,13 @@ golang.org/x/crypto/blowfish
 # golang.org/x/exp/typeparams v0.0.0-20260611194520-c48552f49976
 ## explicit; go 1.25.0
 golang.org/x/exp/typeparams
-# golang.org/x/mod v0.41.0
+# golang.org/x/mod v0.43.0
 ## explicit; go 1.26.0
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/modfile
 golang.org/x/mod/module
 golang.org/x/mod/semver
-# golang.org/x/net v0.59.0
+# golang.org/x/net v0.62.0
 ## explicit; go 1.26.0
 golang.org/x/net/html
 golang.org/x/net/html/atom
@@ -265,16 +267,16 @@ golang.org/x/net/internal/httpsfv
 ## explicit; go 1.25.0
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
-# golang.org/x/sync v0.23.0
+# golang.org/x/sync v0.25.0
 ## explicit; go 1.26.0
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.48.0
+# golang.org/x/sys v0.50.0
 ## explicit; go 1.26.0
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/telemetry v0.0.0-20260924152758-ed294f943157
+# golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a
 ## explicit; go 1.26.0
 golang.org/x/telemetry
 golang.org/x/telemetry/counter
@@ -285,10 +287,10 @@ golang.org/x/telemetry/internal/crashmonitor
 golang.org/x/telemetry/internal/mmap
 golang.org/x/telemetry/internal/telemetry
 golang.org/x/telemetry/internal/upload
-# golang.org/x/term v0.46.0
+# golang.org/x/term v0.47.0
 ## explicit; go 1.26.0
 golang.org/x/term
-# golang.org/x/text v0.42.0
+# golang.org/x/text v0.43.0
 ## explicit; go 1.26.0
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
@@ -298,7 +300,7 @@ golang.org/x/text/unicode/runenames
 # golang.org/x/time v0.14.0
 ## explicit; go 1.24.0
 golang.org/x/time/rate
-# golang.org/x/tools v0.51.0
+# golang.org/x/tools v0.52.0
 ## explicit; go 1.26.0
 golang.org/x/tools/go/analysis
 golang.org/x/tools/go/analysis/passes/appends
@@ -378,6 +380,7 @@ golang.org/x/tools/internal/analysis/intconv
 golang.org/x/tools/internal/analysis/typeindex
 golang.org/x/tools/internal/astutil
 golang.org/x/tools/internal/astutil/free
+golang.org/x/tools/internal/cursorutil
 golang.org/x/tools/internal/diff
 golang.org/x/tools/internal/diff/lcs
 golang.org/x/tools/internal/event
