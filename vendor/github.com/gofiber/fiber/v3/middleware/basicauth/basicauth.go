@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/internal/bytepolicy"
+	"github.com/gofiber/fiber/v3/internal/headerlookup"
 	"github.com/gofiber/fiber/v3/middleware/logger"
 	"github.com/gofiber/utils/v2"
 	"github.com/gofiber/utils/v2/swar"
@@ -35,8 +37,6 @@ func New(config ...Config) fiber.Handler {
 	// Set default config
 	cfg := configDefault(config...)
 
-	var cerr base64.CorruptInputError
-
 	// Return new handler
 	return func(c fiber.Ctx) error {
 		// Don't execute middleware if Next returns true
@@ -44,8 +44,17 @@ func New(config ...Config) fiber.Handler {
 			return c.Next()
 		}
 
-		// Get authorization header and ensure it matches the Basic scheme
-		rawAuth := c.Get(fiber.HeaderAuthorization)
+		// Authorization is a single-value field (RFC 9110 Section 11.6.2), so a
+		// message carrying it on more than one line is malformed and refused
+		// rather than read, whatever the lines are spelled like or hold. Reading
+		// any one of them lets whoever wrote the other decide: the first line
+		// hides a credential behind an empty one, and the first non-empty line
+		// authenticates a request that a net/http layer in front, reading the
+		// field with Header.Get, saw as carrying no credential at all.
+		rawAuth, ok := headerlookup.Value(c, fiber.HeaderAuthorization)
+		if !ok {
+			return cfg.BadRequest(c)
+		}
 		if rawAuth == "" {
 			return cfg.Unauthorized(c)
 		}
@@ -76,7 +85,7 @@ func New(config ...Config) fiber.Handler {
 		// Decode the header contents
 		raw, err := base64.StdEncoding.DecodeString(rest)
 		if err != nil {
-			if errors.As(err, &cerr) {
+			if _, ok := errors.AsType[base64.CorruptInputError](err); ok {
 				raw, err = base64.RawStdEncoding.DecodeString(rest)
 			}
 			if err != nil {
@@ -100,7 +109,7 @@ func New(config ...Config) fiber.Handler {
 
 		// Check if the credentials are in the correct form
 		// which is "username:password".
-		username, password, found := strings.Cut(creds, ":")
+		username, password, found := utils.CutByte(creds, ':')
 		if !found {
 			return cfg.BadRequest(c)
 		}
@@ -134,13 +143,6 @@ func registerLogContextTags() {
 	logger.RegisterContextTag("username", UsernameFromContext)
 }
 
-// asciiCTLMask marks the lanes of w holding ASCII control bytes (C0 or DEL).
-// Lanes >= 0x80 are never marked; callers must route words containing them
-// to the Unicode slow path first.
-func asciiCTLMask(w uint64) uint64 {
-	return swar.MatchRangeMask(w, 0x00, 0x1f) | swar.MatchByteMask(w, 0x7f)
-}
-
 // containsCTL reports whether s contains a Unicode control character
 // (C0, DEL, or C1). ASCII spans are scanned eight bytes at a time; the
 // first word holding a byte >= 0x80 defers the rest to the rune loop,
@@ -154,7 +156,8 @@ func containsCTL(s string) bool {
 		if w&swar.HighBits != 0 {
 			return containsCTLUnicode(s[i:])
 		}
-		if asciiCTLMask(w) != 0 {
+		// The word is ASCII here, so the mask can only mark C0 and DEL.
+		if bytepolicy.NonVisibleASCIIMask(w) != 0 {
 			return true
 		}
 	}
@@ -168,14 +171,14 @@ func containsCTL(s string) bool {
 		if w&swar.HighBits != 0 {
 			return containsCTLUnicode(s[n-swar.WordLen:])
 		}
-		return asciiCTLMask(w) != 0
+		return bytepolicy.NonVisibleASCIIMask(w) != 0
 	}
 	for ; i < n; i++ {
 		c := s[i]
 		if c >= 0x80 {
 			return containsCTLUnicode(s[i:])
 		}
-		if c < 0x20 || c == 0x7f {
+		if bytepolicy.IsNonVisibleASCII(c) {
 			return true
 		}
 	}
@@ -185,13 +188,6 @@ func containsCTL(s string) bool {
 // containsCTLUnicode is the rune-decoding slow path of containsCTL.
 func containsCTLUnicode(s string) bool {
 	return strings.IndexFunc(s, unicode.IsControl) != -1
-}
-
-// validHeaderMask marks the lanes of w holding bytes from the valid header
-// set: HTAB or visible ASCII [0x20, 0x7E]. A word is fully valid iff the
-// mask equals swar.HighBits.
-func validHeaderMask(w uint64) uint64 {
-	return swar.MatchRangeMask(w, 0x20, 0x7e) | swar.MatchByteMask(w, '\t')
 }
 
 // containsInvalidHeaderChars reports whether s holds any byte outside the
@@ -206,7 +202,7 @@ func containsInvalidHeaderChars(s string) bool {
 	n := len(s)
 	i := 0
 	for ; i+swar.WordLen <= n; i += swar.WordLen {
-		if validHeaderMask(swar.Load8(s, i)) != swar.HighBits {
+		if bytepolicy.NonVisibleASCIIOrTabMask(swar.Load8(s, i)) != 0 {
 			return true
 		}
 	}
@@ -216,10 +212,10 @@ func containsInvalidHeaderChars(s string) bool {
 	if n >= swar.WordLen {
 		// Finish with one overlapping word; re-checking bytes that already
 		// passed cannot change the outcome.
-		return validHeaderMask(swar.Load8(s, n-swar.WordLen)) != swar.HighBits
+		return bytepolicy.NonVisibleASCIIOrTabMask(swar.Load8(s, n-swar.WordLen)) != 0
 	}
 	for ; i < n; i++ {
-		if c := s[i]; (c < 0x20 && c != '\t') || c >= 0x7f {
+		if bytepolicy.IsNonVisibleASCIIOrTab(s[i]) {
 			return true
 		}
 	}
