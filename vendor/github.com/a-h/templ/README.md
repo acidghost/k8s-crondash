@@ -13,7 +13,6 @@ See user documentation at https://templ.guide
 <a href="https://pkg.go.dev/github.com/a-h/templ"><img src="https://pkg.go.dev/badge/github.com/a-h/templ.svg" alt="Go Reference" /></a>
 <a href="https://xcfile.dev"><img src="https://xcfile.dev/badge.svg" alt="xc compatible" /></a>
 <a href="https://raw.githack.com/wiki/a-h/templ/coverage.html"><img src="https://github.com/a-h/templ/wiki/coverage.svg" alt="Go Coverage" /></a>
-<a href="https://goreportcard.com/report/github.com/a-h/templ"><img src="https://goreportcard.com/badge/github.com/a-h/templ" alt="Go Report Card" /></a>
 </p>
 
 ## Tasks
@@ -116,17 +115,28 @@ go tool cover -func coverage.out | grep total
 
 ### test-cover-watch
 
-interactive: true
-
 ```sh
 gotestsum --watch -- -coverprofile=coverage.out
 ```
 
 ### test-fuzz
 
+Run each fuzz test for FUZZTIME (default 120s).
+
 ```sh
 ./parser/v2/fuzz.sh
 ./parser/v2/goexpression/fuzz.sh
+./runtime/fuzzing/fuzz.sh
+./internal/jstokenizer/fuzzing/fuzz.sh
+```
+
+### test-fuzz-corpus
+
+Run the runtime and JavaScript tokenizer fuzz tests against their seed and committed corpora, without fuzzing. These fuzz tests are in separate modules, so that their JavaScript engine and parser dependencies are not dependencies of templ, and `go test ./...` in the root module doesn't run them. The parser fuzz tests are in the root module, so `test` and `test-cover` run their corpora.
+
+```sh
+(cd runtime/fuzzing && go test ./...) &&
+	(cd internal/jstokenizer/fuzzing && go test ./...)
 ```
 
 ### benchmark
@@ -135,6 +145,14 @@ Run benchmarks.
 
 ```sh
 go run ./cmd/templ generate -include-version=false && go test ./... -bench=. -benchmem
+```
+
+### benchmark-fmt
+
+Run the templ fmt benchmarks, which include the time taken by prettier.
+
+```sh
+go test ./internal/format -run '^$' -bench BenchmarkTempl -benchtime 3x
 ```
 
 ### fmt
@@ -152,6 +170,14 @@ Run the lint operations that are run as part of the CI.
 
 ```sh
 golangci-lint run --verbose
+```
+
+### vulncheck
+
+Check for known vulnerabilities in dependencies that templ calls.
+
+```sh
+govulncheck ./...
 ```
 
 ### ensure-generated

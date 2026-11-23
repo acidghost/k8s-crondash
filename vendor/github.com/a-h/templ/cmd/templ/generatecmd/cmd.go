@@ -174,9 +174,16 @@ func (cmd Generate) Run(ctx context.Context) (err error) {
 		}
 	}
 
-	// Clean up temporary watch mode text files.
-	if err := cmd.deleteWatchModeTextFiles(); err != nil {
-		cmd.Log.Warn("Failed to delete watch mode text files", slog.Any("error", err))
+	// Clean up temporary watch mode text files. Only do this for watch
+	// sessions: a one-off generate must not delete the text files of a
+	// dev session that is still running, since its server renders from
+	// them (a missing file makes WriteString error out, failing every
+	// render, e.g. running `templ generate` while a `--watch` dev server
+	// is up).
+	if cmd.Args.Watch {
+		if err := cmd.deleteWatchModeTextFiles(); err != nil {
+			cmd.Log.Warn("Failed to delete watch mode text files", slog.Any("error", err))
+		}
 	}
 
 	// Check for errors after everything has completed.
@@ -213,6 +220,8 @@ loop:
 			}
 			// Now we have received an event, wait for 100ms.
 			// If no further messages are received in that time, the timeout will trigger.
+			// The wait must be at least runtime.devModeCheckInterval, so that a reloaded page
+			// renders the .txt file strings written before the reload.
 			timeout = time.NewTimer(time.Millisecond * 100)
 		case <-timeout.C:
 			// If grouped is nil, or if no updates were made, reset the timer and continue waiting.

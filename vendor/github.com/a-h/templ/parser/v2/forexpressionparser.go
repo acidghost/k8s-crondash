@@ -10,17 +10,17 @@ var forExpression parse.Parser[Node] = forExpressionParser{}
 type forExpressionParser struct{}
 
 func (forExpressionParser) Parse(pi *parse.Input) (n Node, matched bool, err error) {
-	r := &ForExpression{}
 	start := pi.Index()
 
 	// Strip leading whitespace and look for `for `.
 	if _, _, err = parse.OptionalWhitespace.Parse(pi); err != nil {
-		return r, false, err
+		return nil, false, err
 	}
 	if !peekPrefix(pi, "for ") {
 		pi.Seek(start)
-		return r, false, nil
+		return nil, false, nil
 	}
+	r := &ForExpression{}
 
 	// Parse the Go for expression.
 	if r.Expression, err = parseGo("for", pi, goexpression.For); err != nil {
@@ -28,7 +28,7 @@ func (forExpressionParser) Parse(pi *parse.Input) (n Node, matched bool, err err
 	}
 
 	// Eat " {\n".
-	_, matched, err = parse.All(openBraceWithOptionalPadding, parse.NewLine).Parse(pi)
+	_, matched, err = openBraceAndNewLine.Parse(pi)
 	if err != nil {
 		return r, true, err
 	}
@@ -43,6 +43,9 @@ func (forExpressionParser) Parse(pi *parse.Input) (n Node, matched bool, err err
 	if nodes, matched, err = tnp.Parse(pi); err != nil || !matched {
 		// If we got any nodes, take them, because the LSP might want to use them.
 		r.Children = nodes.Nodes
+		if err != nil {
+			return r, true, err
+		}
 		return r, true, parse.Error("for: expected nodes, but none were found", pi.Position())
 	}
 	r.Children = nodes.Nodes
@@ -54,4 +57,8 @@ func (forExpressionParser) Parse(pi *parse.Input) (n Node, matched bool, err err
 
 	r.Range = NewRange(pi.PositionAt(start), pi.Position())
 	return r, true, nil
+}
+
+func (p forExpressionParser) Match(in *parse.Input) (ok bool, err error) {
+	return parse.Match(p, in)
 }
