@@ -17,6 +17,7 @@ import (
 
 	"github.com/gofiber/fiber/v3/internal/fieldname"
 	"github.com/gofiber/fiber/v3/internal/schemehost"
+	"github.com/gofiber/fiber/v3/internal/urlnorm"
 )
 
 // Pool for redirection
@@ -38,6 +39,9 @@ var (
 
 const maxPoolableMapSize = 64
 
+// maxPoolableMessages matches the msgp arrays limit below: a redirect holding more sets no cookie.
+const maxPoolableMessages = 256
+
 // FlashCookieName Cookie name to send flash messages when to use redirection.
 const (
 	FlashCookieName = "fiber_flash"
@@ -50,12 +54,8 @@ var flashCookieNeedle = []byte(FlashCookieName + "=")
 // 1) a fast raw-header prefilter to avoid unnecessary cookie parsing,
 // 2) an exact cookie lookup to avoid prefix false positives (e.g. fiber_flashX).
 func hasFlashCookie(header *fasthttp.RequestHeader) bool {
-	rawHeaders := header.RawHeaders()
-	if len(rawHeaders) == 0 {
-		return false
-	}
-
-	if !bytes.Contains(rawHeaders, flashCookieNeedle) {
+	// A request built programmatically has no raw headers, so the prefilter cannot answer for it.
+	if rawHeaders := header.RawHeaders(); len(rawHeaders) > 0 && !bytes.Contains(rawHeaders, flashCookieNeedle) {
 		return false
 	}
 
@@ -120,6 +120,11 @@ func AcquireRedirect() *Redirect {
 // It is forbidden accessing req and/or its members after returning
 // it to redirect pool.
 func ReleaseRedirect(r *Redirect) {
+	// A large WithInput form grows the array past what the cookie can carry; once
+	// pooled, every later release would clear all of it.
+	if len(r.messages) > maxPoolableMessages {
+		return
+	}
 	r.release()
 	redirectPool.Put(r)
 }
@@ -163,7 +168,9 @@ func (r *Redirect) Status(code int) *Redirect {
 // With You can send flash messages by using With().
 // They will be sent as a cookie.
 // You can get them by using: Redirect().Messages(), Redirect().Message()
-// Note: You must use escape char before using ',' and ':' chars to avoid wrong parsing.
+// The cookie payload is MessagePack encoded, so keys and values need no escaping.
+// Calling With again with the same key replaces the earlier message.
+// No cookie is set when Config.DisableFlashMessages is on.
 func (r *Redirect) With(key, value string, level ...uint8) *Redirect {
 	// Get level
 	var msgLevel uint8
@@ -194,7 +201,12 @@ func (r *Redirect) With(key, value string, level ...uint8) *Redirect {
 // They will be sent as a cookie.
 // This method can send form, multipart form, query data to redirected route.
 // You can get them by using: Redirect().OldInputs(), Redirect().OldInput()
+// It does nothing when Config.DisableFlashMessages is on.
 func (r *Redirect) WithInput() *Redirect {
+	if r.c.app.config.DisableFlashMessages {
+		return r
+	}
+
 	ctype := bindMediaType(&r.c.RequestCtx().Request.Header)
 
 	oldInput := acquireOldInput()
@@ -347,8 +359,8 @@ func (r *Redirect) Route(name string, config ...RedirectConfig) error {
 		cfg = config[0]
 	}
 
-	// Get location from route name. The composed path is already held to this
-	// origin — see asRoutePath — so only the query is left to place.
+	// Get location from route name. buildRouteURL already holds the composed
+	// path to this origin, so only the query is left to place.
 	route := r.c.App().GetRoute(name)
 	location, err := r.c.getLocationFromRoute(&route, cfg.Params)
 	if err != nil {
@@ -389,8 +401,7 @@ func (r *Redirect) Route(name string, config ...RedirectConfig) error {
 }
 
 // queryMergePoint says where a query belongs in location: the separator that
-// introduces it, and where the fragment starts, or -1. A parameter spliced into
-// a route path may hold both, and appending "?" folded them into one value.
+// introduces it, and where the fragment starts, or -1.
 func queryMergePoint(location string) (separator string, fragment int) { //nolint:nonamedreturns // the two results are easy to swap without names
 	fragment = strings.IndexByte(location, '#')
 
@@ -455,7 +466,7 @@ func (r *Redirect) sameOriginReferer(location string) (string, bool) {
 	// The normalized value is what gets redirected to, so a client that does
 	// not apply these rules itself cannot resolve a different origin than the
 	// one validated here.
-	location = normalizeRefererURL(location)
+	location = urlnorm.Referer(location)
 	if location == "" {
 		return "", false
 	}
@@ -478,55 +489,6 @@ func (r *Redirect) sameOriginReferer(location string) (string, bool) {
 	}
 
 	return location, schemehost.Match(parsed.Scheme, parsed.Host, r.c.Scheme(), r.c.Host())
-}
-
-// normalizeRefererURL applies the parts of the WHATWG parser that decide which
-// origin a Referer resolves to: strip surrounding C0 controls, drop tab and
-// newline, fold backslashes, collapse a leading slash run to two.
-func normalizeRefererURL(location string) string {
-	location = strings.TrimFunc(location, func(c rune) bool { return c <= ' ' })
-
-	var b []byte
-	inPath := true
-	for i := 0; i < len(location); i++ {
-		c := location[i]
-		switch {
-		case c == '\t' || c == '\n' || c == '\r':
-			if b == nil {
-				b = append(make([]byte, 0, len(location)), location[:i]...)
-			}
-			continue
-		case c == '?' || c == '#':
-			inPath = false
-		case c == '\\' && inPath:
-			if b == nil {
-				b = append(make([]byte, 0, len(location)), location[:i]...)
-			}
-			b = append(b, '/')
-			continue
-		}
-		if b != nil {
-			b = append(b, c)
-		}
-	}
-	if b != nil {
-		location = string(b)
-	}
-
-	// "///evil.com" reaches the same authority state as "//evil.com", so keep
-	// at most the two slashes that introduce it.
-	if strings.HasPrefix(location, "//") {
-		n := 0
-		for n < len(location) && location[n] == '/' {
-			n++
-		}
-		if n == len(location) {
-			return "/"
-		}
-		location = location[n-2:]
-	}
-
-	return location
 }
 
 // parseAndClearFlashMessages is a method to get flash messages before they are getting removed
@@ -565,7 +527,7 @@ func (r *Redirect) parseAndClearFlashMessages() {
 // The payload is hex-encoded, not signed, and WithInput copies the whole form
 // into it — so the cookie is HTTPOnly, and Secure whenever the request was TLS.
 func (r *Redirect) processFlashMessages() {
-	if len(r.messages) == 0 {
+	if len(r.messages) == 0 || r.c.app.config.DisableFlashMessages {
 		return
 	}
 
