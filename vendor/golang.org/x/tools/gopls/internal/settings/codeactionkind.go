@@ -85,7 +85,8 @@ const (
 	OrganizeImports            protocol.CodeActionKind = "source.organizeImports"
 
 	// gopls
-	GoplsDocFeatures protocol.CodeActionKind = "gopls.doc.features"
+	GoplsDocFeatures  protocol.CodeActionKind = "gopls.doc.features"
+	GoplsDragonSlayer protocol.CodeActionKind = "gopls.dragonSlayer"
 
 	// refactor.rewrite
 	RefactorRewriteChangeQuote        protocol.CodeActionKind = "refactor.rewrite.changeQuote"
@@ -116,7 +117,8 @@ const (
 	RefactorExtractToNewFile   protocol.CodeActionKind = "refactor.extract.toNewFile"
 
 	// refactor.move
-	RefactorMoveType protocol.CodeActionKind = "refactor.move.moveType"
+	RefactorMoveType        protocol.CodeActionKind = "refactor.move.moveType"
+	RefactorMoveDeclaration protocol.CodeActionKind = "refactor.move.moveDeclaration"
 
 	// Note: add new kinds to:
 	// - the SupportedCodeActions map in default.go

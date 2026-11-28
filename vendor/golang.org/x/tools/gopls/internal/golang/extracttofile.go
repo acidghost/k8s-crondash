@@ -25,6 +25,7 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
+	"golang.org/x/tools/internal/astutil"
 )
 
 // canExtractToNewFile reports whether the code in the given range can be extracted to a new file.
@@ -33,11 +34,11 @@ func canExtractToNewFile(pgf *parsego.File, start, end token.Pos) bool {
 	return ok
 }
 
-// findImportEdits finds imports specs that needs to be added to the new file
-// or deleted from the old file if the range is extracted to a new file.
+// findImportChanges finds imports specs that needs to be added to the destination file
+// or deleted from the old file if the given ranges are extracted.
 //
 // TODO: handle dot imports.
-func findImportEdits(file *ast.File, info *types.Info, start, end token.Pos) (adds, deletes []*ast.ImportSpec, _ error) {
+func findImportChanges(file *ast.File, info *types.Info, ranges ...astutil.Range) (adds, deletes []*ast.ImportSpec, _ error) {
 	// make a map from a pkgName to its references
 	pkgNameReferences := make(map[*types.PkgName][]*ast.Ident)
 	for ident, use := range info.Uses {
@@ -46,9 +47,9 @@ func findImportEdits(file *ast.File, info *types.Info, start, end token.Pos) (ad
 		}
 	}
 
-	// PkgName referenced in the extracted selection must be
+	// PkgName referenced in any extracted selection must be
 	// imported in the new file.
-	// PkgName only referenced in the extracted selection must be
+	// PkgName only referenced in extracted selections must be
 	// deleted from the original file.
 	for _, spec := range file.Imports {
 		if spec.Name != nil && spec.Name.Name == "." {
@@ -62,7 +63,14 @@ func findImportEdits(file *ast.File, info *types.Info, start, end token.Pos) (ad
 		usedInSelection := false
 		usedInNonSelection := false
 		for _, ident := range pkgNameReferences[pkgName] {
-			if posRangeContains(start, end, ident.Pos(), ident.End()) {
+			inSelection := false
+			for _, rng := range ranges {
+				if posRangeContains(rng.Start, rng.EndPos, ident.Pos(), ident.End()) {
+					inSelection = true
+					break
+				}
+			}
+			if inSelection {
 				usedInSelection = true
 			} else {
 				usedInNonSelection = true
@@ -98,8 +106,6 @@ func ExtractToNewFile(ctx context.Context, snapshot *cache.Snapshot, fh file.Han
 	if !ok {
 		return nil, fmt.Errorf("invalid selection")
 	}
-	pgf.CheckPos(start) // #70553
-	// Inv: start is valid wrt pgf.Tok.
 
 	// select trailing empty lines
 	offset, err := safetoken.Offset(pgf.Tok, end)
@@ -109,28 +115,17 @@ func ExtractToNewFile(ctx context.Context, snapshot *cache.Snapshot, fh file.Han
 	rest := pgf.Src[offset:]
 	spaces := len(rest) - len(bytes.TrimLeft(rest, " \t\n"))
 	end += token.Pos(spaces)
-	pgf.CheckPos(end) // #70553
-	if !(start <= end) {
-		bug.Reportf("start: not before end")
+	src, err := pgf.PosText(start, end)
+	if err != nil {
+		return nil, err
 	}
-	// Inv: end is valid wrt pgf.Tok; env >= start.
-	fileStart := pgf.File.FileStart
-	pgf.CheckPos(fileStart) // #70553
-	if !(0 <= start-fileStart) {
-		bug.Reportf("start: out of bounds")
-	}
-	if !(int(end-fileStart) <= len(pgf.Src)) {
-		bug.Reportf("end: out of bounds")
-	}
-	// Inv: 0 <= start-fileStart <= end-fileStart <= len(Src).
-	src := pgf.Src[start-fileStart : end-fileStart]
 
 	replaceRange, err := pgf.PosRange(start, end)
 	if err != nil {
 		return nil, bug.Errorf("invalid range: %v", err)
 	}
 
-	adds, deletes, err := findImportEdits(pgf.File, pkg.TypesInfo(), start, end)
+	adds, deletes, err := findImportChanges(pgf.File, pkg.TypesInfo(), astutil.RangeOf(start, end))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +175,7 @@ func ExtractToNewFile(ctx context.Context, snapshot *cache.Snapshot, fh file.Han
 
 	newFileContent, err := format.Source(buf.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to format extracted source: %w", err)
 	}
 
 	return []protocol.DocumentChange{
